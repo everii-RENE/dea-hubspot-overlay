@@ -2,7 +2,7 @@
 // @name         [DEA] HubSpot Overlay Customizer
 // @version      6.1.0
 // @description  Stable release: compact DEA / clone / terminal / YouTrack / GitHub bar for HubSpot
-// @author       René Schaffra
+// @author       RENE
 // @match        https://app-eu1.hubspot.com/*
 // @match        https://production.teambox-deployment-tool.service.de1.everii/teamboxes/*/delete
 // @match        https://production.teambox-deployment-tool.service.de1.everii/teamboxes/*/custom_deployment
