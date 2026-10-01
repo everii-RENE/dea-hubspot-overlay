@@ -1,8 +1,8 @@
 // ==UserScript==
 // @name         [DEA] HubSpot Overlay Customizer
 // @version      6.1.0
-// @updateURL    https://raw.githubusercontent.com/everii-RENE/dea-hubspot-overlay/test-update/dea-hubspot-overlay.user.js
-// @downloadURL  https://raw.githubusercontent.com/everii-RENE/dea-hubspot-overlay/test-update/dea-hubspot-overlay.user.js
+// @updateURL    https://raw.githubusercontent.com/everii-RENE/dea-hubspot-overlay/master/dea-hubspot-overlay.user.js
+// @downloadURL  https://raw.githubusercontent.com/everii-RENE/dea-hubspot-overlay/master/dea-hubspot-overlay.user.js
 // @description  Stable release: compact DEA / clone / terminal / YouTrack / GitHub bar for HubSpot
 // @author       RENE
 // @match        https://app-eu1.hubspot.com/*
