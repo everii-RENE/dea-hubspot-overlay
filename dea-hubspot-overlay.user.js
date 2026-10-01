@@ -1,6 +1,6 @@
 // ==UserScript==
 // @name         [DEA] HubSpot Overlay Customizer
-// @version      6.2.2
+// @version      6.2.3
 // @updateURL    https://raw.githubusercontent.com/everii-RENE/dea-hubspot-overlay/master/dea-hubspot-overlay.user.js
 // @downloadURL  https://raw.githubusercontent.com/everii-RENE/dea-hubspot-overlay/master/dea-hubspot-overlay.user.js
 // @description  Stable release: compact DEA / clone / terminal / YouTrack / GitHub bar for HubSpot
@@ -2691,6 +2691,31 @@ if (typeof GM_registerMenuCommand === 'function') {
             if (dropdown) dropdown.setAttribute('aria-hidden', 'true');
         });
     }
+
+    // Dropdowns schließen, sobald außerhalb des Menüs geklickt wird (oder Escape).
+    // Rechtsklick auf das T selbst bleibt dem Toggle-Handler überlassen.
+    (function installCloneDropdownOutsideClose() {
+        if (window.__deaDropdownOutsideClose) return;
+        window.__deaDropdownOutsideClose = true;
+        const onPointerDown = event => {
+            if (!document.querySelector(`#${BAR_ID} .dea-clone-state-wrap.is-open`)) return;
+            const target = event.target instanceof Element ? event.target : null;
+            if (target && target.closest('.dea-clone-state-dropdown')) return;
+            if (target && event.button === 2 && target.closest('.dea-clone-state-wrap')) return;
+            closeCloneDropdowns();
+        };
+        window.addEventListener('pointerdown', onPointerDown, true);
+        window.addEventListener('mousedown', onPointerDown, true);
+        window.addEventListener('contextmenu', event => {
+            const target = event.target instanceof Element ? event.target : null;
+            if (target && target.closest('.dea-clone-state-wrap')) return;
+            closeCloneDropdowns();
+        }, true);
+        window.addEventListener('keydown', event => {
+            if (event.key === 'Escape') closeCloneDropdowns();
+        }, true);
+        window.addEventListener('blur', () => closeCloneDropdowns());
+    })();
 
     function rememberRevision(data, ticketId) {
         let old = [];
