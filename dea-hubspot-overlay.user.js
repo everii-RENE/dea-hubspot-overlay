@@ -1,6 +1,6 @@
 // ==UserScript==
 // @name         [DEA] HubSpot Overlay Customizer
-// @version      6.1.3
+// @version      6.2.0
 // @updateURL    https://raw.githubusercontent.com/everii-RENE/dea-hubspot-overlay/master/dea-hubspot-overlay.user.js
 // @downloadURL  https://raw.githubusercontent.com/everii-RENE/dea-hubspot-overlay/master/dea-hubspot-overlay.user.js
 // @description  Stable release: compact DEA / clone / terminal / YouTrack / GitHub bar for HubSpot
@@ -249,13 +249,84 @@ if (typeof GM_registerMenuCommand === 'function') {
         }) || null;
     }
 
-    function clickDeleteAllDataButton() {
+    // Schließt den Tab zuverlässig. window.close() wird vom Browser nur unter
+    // Bedingungen erlaubt (Tab per Script geöffnet bzw. nur 1 History-Eintrag) und
+    // schlägt sonst stillschweigend fehl -> mehrfach mit Pausen versuchen.
+    function closeTabReliably() {
+        let attempts = 0;
+        const tryClose = () => {
+            attempts += 1;
+            try { window.close(); } catch (error) { /* ignorieren */ }
+            try { if (typeof unsafeWindow !== 'undefined') unsafeWindow.close(); } catch (error) { /* ignorieren */ }
+            if (attempts < 10) window.setTimeout(tryClose, 300);
+        };
+        tryClose();
+    }
+
+    let deleteSubmitStarted = false;
+
+    function clickDeleteAllDataButton(retryCount = 0) {
         const button = findButtonByLabel('delete all data');
         if (!button || button.disabled) return false;
-        button.click();
-        window.setTimeout(() => {
-            window.close();
-        }, 500);
+        if (deleteSubmitStarted) return true;
+        deleteSubmitStarted = true;
+
+        const form = button.form || button.closest('form');
+        const canFetch = form && typeof fetch === 'function' && typeof FormData === 'function';
+
+        if (!canFetch) {
+            // Fallback: normaler Submit, Tab nach der Navigation schließen.
+            button.click();
+            window.setTimeout(closeTabReliably, 1500);
+            return true;
+        }
+
+        // Formular per fetch absenden statt per Navigation: Der Tab bleibt auf
+        // einem einzigen History-Eintrag (dann darf der Browser ihn schließen),
+        // und er wird erst geschlossen, wenn der Server geantwortet hat. Vorher
+        // konnte das feste 500-ms-Timeout den Request abbrechen oder zu früh/spät
+        // feuern.
+        let data;
+        try {
+            data = new FormData(form);
+            if (button.name) data.set(button.name, button.value || '');
+        } catch (error) {
+            data = null;
+        }
+        if (!data) {
+            button.click();
+            window.setTimeout(closeTabReliably, 1500);
+            return true;
+        }
+
+        fetch(form.action || window.location.href, {
+            method: (form.method || 'POST').toUpperCase(),
+            body: data,
+            credentials: 'same-origin',
+            redirect: 'manual'
+        }).then(response => {
+            // Redirect (opaqueredirect, Status 0) oder 2xx = Löschung angestoßen.
+            if (response.type === 'opaqueredirect' || response.ok) {
+                closeTabReliably();
+            } else if (retryCount < 3) {
+                // Z. B. wenn gleichzeitig mehrere Löschvorgänge laufen und der
+                // Server kurz ablehnt: nach kurzer Pause erneut versuchen.
+                retryCount += 1;
+                log(`Delete submit failed: HTTP ${response.status}; retry ${retryCount}`);
+                window.setTimeout(() => {
+                    deleteSubmitStarted = false;
+                    clickDeleteAllDataButton(retryCount);
+                }, 1500);
+            } else {
+                log(`Delete submit failed: HTTP ${response.status}; tab stays open`);
+                document.title = `[Löschen fehlgeschlagen: HTTP ${response.status}] ${document.title}`;
+                deleteSubmitStarted = false;
+            }
+        }).catch(error => {
+            log('Delete fetch failed; falling back to native submit', error);
+            button.click();
+            window.setTimeout(closeTabReliably, 1500);
+        });
         return true;
     }
 
@@ -278,7 +349,13 @@ if (typeof GM_registerMenuCommand === 'function') {
         };
 
         const start = () => {
-            pollUntil(tryCopy, { timeoutMs: 15000 });
+            pollUntil(tryCopy, { timeoutMs: 15000 }).then(done => {
+                // Kein Löschformular (z. B. Teambox schon gelöscht / zweiter Tab
+                // für dieselbe Teambox): Tab nicht offen liegen lassen.
+                if (!done && !deleteSubmitStarted && !findButtonByLabel('delete all data')) {
+                    closeTabReliably();
+                }
+            });
         };
 
         if (document.readyState === 'loading') {
@@ -619,6 +696,18 @@ if (typeof GM_registerMenuCommand === 'function') {
     const DEA_ICON = 'data:image/webp;base64,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';
     const CLONE_RUNNING_ICON = 'data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAABgAAAAYCAIAAABvFaqvAAAAs0lEQVR42u2UoQ7CMBCGv+u2QhZwCOxeAsEz7AH2vhAEdnZqCoFDLawtZoO2YkEQEOxy5r/rffnbXCrkfCQUzKBvgdJIn86BFEEUgLM4F7T2u0nQau1j6O90HcBiSZqBe9vR8fDy4no2W4oCoGm4XpA09uVFHqYaMwMoK+qWuqWsAMi8A+Fg7EiNi54kmBtaD1JrlCLJMWaoWDt5tWdbBOs9sHNYi9h4ft7sX4Bk/tj+GfQADCotIOGCbFMAAAAASUVORK5CYII=';
     const CLONE_NOT_RUNNING_ICON = 'data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAABgAAAAYCAIAAABvFaqvAAAA1UlEQVR42u2UMQrCQBBF/+xuIIg2Qq5h5THsPIe1Z7D2Huk8hVXqgAcI2JhGcJlvoSZhFVk02JgpFv4sPP7MflYwQi9lgAH0K5AL9Hq1FpFWPwQBkE2b5Ga7eQdK07QLUlXvPYDEOuMMGO2oPJQ3kECoHE/G2TQDUB2r+lQ3myBDpISB9J3tnTGbz5aLJYB8lxf7Aimgrz2EjiS5z2WM0Ys65wACYq0VKyYxqvrSVAhqrvmou2ob/PD52VeOpDm+DyQjbLkIjsgHyX4upcasSoaP7Z9BVwooUQUMOP9TAAAAAElFTkSuQmCC';
+    // Lade-Icon: graues T, das sich von unten nach oben mit dem Grün des
+    // laufenden T füllt und danach wieder von unten beginnt.
+    const CLONE_LOADING_ICON = 'data:image/svg+xml;charset=UTF-8,' + encodeURIComponent(
+        '<svg xmlns="http://www.w3.org/2000/svg" xmlns:xlink="http://www.w3.org/1999/xlink" viewBox="0 0 24 24">' +
+        '<defs><clipPath id="fill"><rect x="0" width="24" y="24" height="0">' +
+        '<animate attributeName="y" values="24;0;0" keyTimes="0;0.85;1" dur="3s" repeatCount="indefinite"/>' +
+        '<animate attributeName="height" values="0;24;24" keyTimes="0;0.85;1" dur="3s" repeatCount="indefinite"/>' +
+        '</rect></clipPath></defs>' +
+        '<image width="24" height="24" href="' + CLONE_NOT_RUNNING_ICON + '" xlink:href="' + CLONE_NOT_RUNNING_ICON + '"/>' +
+        '<image width="24" height="24" clip-path="url(#fill)" href="' + CLONE_RUNNING_ICON + '" xlink:href="' + CLONE_RUNNING_ICON + '"/>' +
+        '</svg>'
+    );
     const CLONE_PROGRESS_ICON = 'data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAABgAAAAYCAYAAADgdz34AAAD1klEQVR42tVVX2hbVRj/vnPubRJiL1lLRSIiWNxcY1VUtOimFxUE++DwTVQwLclNCza+9MWXey8+FSysrCY5SSFvjjUy8UUQprZTmHtZt7FIEVlHt6XdWhKbYNOmzfl8uZG7LAl1+OJ5PN93vu87vz/nAPzfF+8UJCIMhUJ8YGCALywskG3bQEQIAEzXdVxcXHzwzvPz8/wgeaZpsk5x7BScmprq7uvrewMR36rValnDMC5lMpn3AKC7Xq+vIOIVwzC2OtVQmiGxLAuDwWA3AHzMOf9EUZT+3t5eWF1d/REALkkp+3w+3zeVSuURRVFOpNPp64FA4GI+n9+3bVs2N7jvek7SYa/Xe1LTtP6dnZ2N9fX1HOc87+C/sr29PYyIXFGU76SUb29tbR1yzmE7iJCIIJfLqfl8HmzbrgkhTnR1dR2v1WpfGIax5j40Ozv7EOf8WcbYECKeiUajt5LJ5KNjY2O3nZrUktBUKnUqk8mcy2QyPc1xZ/qGiu5Zc3NzTwshPhdCvNJMPJqmyWzblolE4oiiKFcDgUBXsVj8aG1t7auenh51YmKihojUTj3BYJAT0aeIeBIRP6hWq2fj8Xj5Hw50XWcAAJzzDzVN48Vi8bLH4/nasiyKx+Mti7u4AsMw9hDxAmPsKBH97PV6n3EPwHRdrzsQva9pGgeAXDgc3rEsi9+HZZsm5XJ5CQBe8Pv9+4h49B4VISKVSiUGAKc2Nzc/Y4yddoiSBzEaEeHk5ORfAPA753yIiFYAACzLov/yycGOgWw2693d3X3H6/WyWq32azQavU1E0A7/5hsgIiWTyZc0TXusUqlsxGKx8439hpy8iNhHRNfq9frrAECWZeGBRkeE6elpHwAM1uv1KwDwlAMRAgAw0zRZOBz+ExFL4XB4GRH3s9lsoJXt20iV/H7/c4yxpXK5vAcAy+2eilUhxMuMsaW9vb1hIkIhhNrKWI3ioVAIhRAqABwrFAqXVVXVPR7PVbfC0J1cKpXCAOBXVfXsyMjITTcSDU4axnQ3E0I8T0TvAsAPsVjsvDsHXWRTIpE4pKpqVyQSuZNIJI4rihJCxHORSOQPd8GZmRmPx+MZBIBjnPPTkUjkjhCiv1AorNi2TW7/tLx+KpV6DQAGpZQ5zvkQADwMAD9Fo9Hr6XRaR8QnpJS/IeINIopJKb8cHx+/26oWa8bVNE0mpVwGgE1FUV6tVqsXEfEaY+yII9vDRPStlLJIRG8S0S8+n6/sEI4dPxwXtncB4EwymXzS5/O9yBh7HAAuOLEiY2yYc34LEb8fHR3deCBntlPPv/2T/wbd+8Un6gkbJwAAAABJRU5ErkJggg==';
     const CUSTOMERBOX_ICON = 'data:image/png;base64,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';
     const CUSTOMERBOX_LOADING_ICON = 'https://raw.githubusercontent.com/everii-RENE/dea-hubspot-overlay/refs/heads/master/img/loading-indicator.gif';
@@ -942,8 +1031,8 @@ if (typeof GM_registerMenuCommand === 'function') {
                 position: absolute !important;
                 left: 0 !important;
                 top: 1px !important;
-                width: 12px !important;
-                height: 12px !important;
+                width: 13px !important;
+                height: 13px !important;
                 animation: dea-sync-spin 0.9s linear infinite !important;
             }
 
@@ -1035,6 +1124,24 @@ if (typeof GM_registerMenuCommand === 'function') {
             #${BAR_ID} .dea-clone-state-indexed {
                 position: relative !important;
                 overflow: visible !important;
+            }
+
+            #${BAR_ID} .dea-clone-spinner-badge {
+                position: absolute !important;
+                right: -4px !important;
+                bottom: -4px !important;
+                z-index: 3 !important;
+                width: 13px !important;
+                height: 13px !important;
+                background: url("data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 12 12'><rect x='1.5' y='0.5' width='9' height='1.6' rx='0.4' fill='%23bdbdbd'/><rect x='1.5' y='9.9' width='9' height='1.6' rx='0.4' fill='%23bdbdbd'/><path d='M2.6 2.1h6.8c0 2.2-1.6 3-2.6 3.9 1 0.9 2.6 1.7 2.6 3.9H2.6c0-2.2 1.6-3 2.6-3.9C4.2 5.1 2.6 4.3 2.6 2.1z' fill='%23dcdcdc' stroke='%23808080' stroke-width='0.7'/><path d='M3.9 2.9h4.2c-0.3 1.1-1.2 1.6-2.1 2.4c-0.9-0.8-1.8-1.3-2.1-2.4z' fill='%23666666'/><path d='M4.2 9.3c0.4-1.2 1-1.6 1.8-2.2c0.8 0.6 1.4 1 1.8 2.2z' fill='%23999999'/></svg>") center / contain no-repeat !important;
+                transform-origin: 50% 50% !important;
+                animation: dea-clone-hourglass 1.6s ease-in-out infinite !important;
+                pointer-events: none !important;
+            }
+            @keyframes dea-clone-hourglass {
+                0% { transform: rotate(0deg); }
+                50% { transform: rotate(180deg); }
+                100% { transform: rotate(360deg); }
             }
 
             #${BAR_ID} .dea-clone-index-badge {
@@ -2284,8 +2391,25 @@ if (typeof GM_registerMenuCommand === 'function') {
         const title = running
             ? `Open Clone ${index + 1}: ${getCloneName(clone)}`
             : `Open Clone ${index + 1} nicht verfügbar (Status: ${String(clone && clone.state || 'unbekannt')})`;
-        const icon = running ? CLONE_RUNNING_ICON : CLONE_NOT_RUNNING_ICON;
+        const cloneDeploymentId = String(getCloneDeploymentId(clone, getCloneUrl(clone)) || '');
+        if (running && cloneDeploymentId && pendingCloneIds.has(cloneDeploymentId)) {
+            stopCloneStatePolling(cloneDeploymentId);
+        }
+        const showSpinner = !running && cloneDeploymentId && pendingCloneIds.has(cloneDeploymentId);
+        const icon = running ? CLONE_RUNNING_ICON : (showSpinner ? CLONE_LOADING_ICON : CLONE_NOT_RUNNING_ICON);
         const wrapper = document.createElement('span');
+        // Ladendes T: Klick öffnet die Progress-Seite statt die Leiste neu zu laden.
+        const activateIcon = () => {
+            if (showSpinner) {
+                const now = Date.now();
+                if (now - (activateIcon.last || 0) < 600) return; // pointerdown + click entprellen
+                activateIcon.last = now;
+                const progressUrl = `${TOOL}/teamboxes/${encodeURIComponent(cloneDeploymentId)}/progress`;
+                window.open(progressUrl, '_blank', 'noopener,noreferrer');
+            } else {
+                reloadOverlay();
+            }
+        };
         wrapper.className = 'dea-clone-state-wrap';
 
         const reloadCurrentPage = event => {
@@ -2302,7 +2426,7 @@ if (typeof GM_registerMenuCommand === 'function') {
             if (typeof event.stopImmediatePropagation === 'function') {
                 event.stopImmediatePropagation();
             }
-            reloadOverlay();
+            activateIcon();
         };
 
         if (running) {
@@ -2324,8 +2448,8 @@ if (typeof GM_registerMenuCommand === 'function') {
         } else {
             const disabled = document.createElement('span');
             disabled.className = 'dea-link dea-clone-state-disabled';
-            disabled.title = `${title}. Klicken zum Neuladen`;
-            disabled.setAttribute('aria-label', `${title}. Klicken zum Neuladen`);
+            disabled.title = (showSpinner ? `${title}. Klicken öffnet den Fortschritt` : `${title}. Klicken zum Neuladen`);
+            disabled.setAttribute('aria-label', (showSpinner ? `${title}. Klicken öffnet den Fortschritt` : `${title}. Klicken zum Neuladen`));
             disabled.setAttribute('aria-disabled', 'true');
             disabled.setAttribute('role', 'button');
             disabled.setAttribute('tabindex', '0');
@@ -2340,11 +2464,11 @@ if (typeof GM_registerMenuCommand === 'function') {
                 if (typeof event.stopImmediatePropagation === 'function') {
                     event.stopImmediatePropagation();
                 }
-                reloadOverlay();
+                activateIcon();
             };
             wrapper.setAttribute('role', 'button');
             wrapper.setAttribute('tabindex', '0');
-            wrapper.setAttribute('aria-label', `${title}. Klicken zum Neuladen`);
+            wrapper.setAttribute('aria-label', (showSpinner ? `${title}. Klicken öffnet den Fortschritt` : `${title}. Klicken zum Neuladen`));
             wrapper.addEventListener('pointerdown', reloadCurrentPage, true);
             wrapper.addEventListener('mousedown', reloadCurrentPage, true);
             wrapper.addEventListener('click', reloadCurrentPage, true);
@@ -2857,6 +2981,8 @@ if (typeof GM_registerMenuCommand === 'function') {
             if (!popup) {
                 log('DEA icon popup blocked', target);
             }
+            const deleteMatch = /\/teamboxes\/(\d+)\/delete\/?(?:[?#].*)?$/i.exec(target);
+            if (deleteMatch) startDeletePolling(deleteMatch[1]);
         }, true);
 
         const image = attachIconImage(link, icon, title);
@@ -3896,13 +4022,127 @@ if (typeof GM_registerMenuCommand === 'function') {
         return config.issues_url || config.create_url || null;
     }
 
+    // --- Delete-Polling: wartet, bis die Teambox nicht mehr existiert ---------
+    const deletePollers = new Map();
+    const DELETE_POLL_INTERVAL_MS = 1000;
+    const DELETE_POLL_TIMEOUT_MS = 15 * 60 * 1000;
+
+    function checkTeamboxGone(deploymentId) {
+        return new Promise(resolve => {
+            GM_xmlhttpRequest({
+                method: 'GET',
+                url: `${TOOL}/teamboxes/${encodeURIComponent(deploymentId)}`,
+                withCredentials: true,
+                anonymous: false,
+                timeout: 8000,
+                onload: res => {
+                    const text = String(res.responseText || '');
+                    resolve(res.status === 404 || /The requested resource does not exist/i.test(text));
+                },
+                onerror: () => resolve(false),
+                ontimeout: () => resolve(false)
+            });
+        });
+    }
+
+    function startDeletePolling(deploymentId) {
+        const id = String(deploymentId || '');
+        if (!id || deletePollers.has(id)) return;
+        const startedAt = Date.now();
+        let busy = false;
+        const timer = window.setInterval(async () => {
+            if (busy) return;
+            if (Date.now() - startedAt > DELETE_POLL_TIMEOUT_MS) {
+                window.clearInterval(timer);
+                deletePollers.delete(id);
+                return;
+            }
+            busy = true;
+            try {
+                if (await checkTeamboxGone(id)) {
+                    window.clearInterval(timer);
+                    deletePollers.delete(id);
+                    // Nur die Leiste neu laden, nicht den Tab.
+                    lastOverlayReloadAt = 0;
+                    reloadOverlay();
+                }
+            } finally {
+                busy = false;
+            }
+        }, DELETE_POLL_INTERVAL_MS);
+        deletePollers.set(id, timer);
+    }
+
+    // --- Clone-Status-Polling (ersetzt den Progress-Tab) -------------------
+    const pendingCloneIds = new Set();
+    const cloneStatePollers = new Map();
+    const CLONE_POLL_INTERVAL_MS = 1000;
+    const CLONE_POLL_TIMEOUT_MS = 15 * 60 * 1000;
+
+    function fetchTeamboxPageState(deploymentId) {
+        return new Promise(resolve => {
+            GM_xmlhttpRequest({
+                method: 'GET',
+                url: `${TOOL}/teamboxes/${encodeURIComponent(deploymentId)}`,
+                withCredentials: true,
+                anonymous: false,
+                timeout: 8000,
+                onload: res => {
+                    try {
+                        const doc = new DOMParser().parseFromString(String(res.responseText || ''), 'text/html');
+                        const dt = Array.from(doc.querySelectorAll('dt'))
+                            .find(el => /^\s*State:?\s*$/i.test(el.textContent || ''));
+                        const dd = dt && dt.nextElementSibling;
+                        resolve(dd ? dd.textContent.replace(/\s+/g, ' ').trim() : null);
+                    } catch (error) {
+                        resolve(null);
+                    }
+                },
+                onerror: () => resolve(null),
+                ontimeout: () => resolve(null)
+            });
+        });
+    }
+
+    function stopCloneStatePolling(deploymentId) {
+        const poller = cloneStatePollers.get(String(deploymentId));
+        if (poller) window.clearInterval(poller.timer);
+        cloneStatePollers.delete(String(deploymentId));
+        pendingCloneIds.delete(String(deploymentId));
+    }
+
+    function startCloneStatePolling(deploymentId) {
+        const id = String(deploymentId);
+        pendingCloneIds.add(id);
+        if (cloneStatePollers.has(id)) return;
+        const startedAt = Date.now();
+        let busy = false;
+        const timer = window.setInterval(async () => {
+            if (busy) return;
+            if (Date.now() - startedAt > CLONE_POLL_TIMEOUT_MS || !pendingCloneIds.has(id)) {
+                stopCloneStatePolling(id);
+                return;
+            }
+            busy = true;
+            try {
+                const pageState = await fetchTeamboxPageState(id);
+                if (pageState && /running/i.test(pageState)) {
+                    // Nur die Leiste neu laden; Polling endet, sobald die Leiste
+                    // den Clone als "running" rendert (siehe addCloneStateIcon).
+                    lastOverlayReloadAt = 0;
+                    reloadOverlay();
+                }
+            } finally {
+                busy = false;
+            }
+        }, CLONE_POLL_INTERVAL_MS);
+        cloneStatePollers.set(id, { timer });
+        const poller = cloneStatePollers.get(id);
+        poller.timer = timer;
+    }
+
     async function createClone(event, teambox, links) {
         if (!state.ticketId || !teambox || !teambox.id) return;
-        const popup = window.open('about:blank', '_blank');
-        if (!popup) {
-            alert('Bitte Pop-ups für HubSpot erlauben und erneut klicken.');
-            return;
-        }
         const source = event.currentTarget;
         source.classList.add('is-disabled');
         try {
@@ -3912,7 +4152,8 @@ if (typeof GM_registerMenuCommand === 'function') {
             const setupPath = response.clone && (response.clone.setup_path || response.clone.path || response.clone.url);
             if (!setupPath) throw new Error('DEA lieferte keinen Clone-Link zurück');
             const createdCloneDeploymentId = getCloneCreationDeploymentId(response, setupPath);
-            popup.location.href = joinUrl(TOOL, setupPath);
+            // Kein neuer Tab mehr: Der Status wird im Hintergrund jede Sekunde geprüft.
+            if (createdCloneDeploymentId) startCloneStatePolling(createdCloneDeploymentId);
             const refreshed = await apiRequest('GET', 'hubspot/ticket', state.ticketId);
             attachCreatedCloneDeploymentId(
                 refreshed,
@@ -3930,7 +4171,6 @@ if (typeof GM_registerMenuCommand === 'function') {
                 renderCustomerboxMode();
             }
         } catch (error) {
-            popup.close();
             if (isTicketNotOpenError(error)) state.ticketOwnerAccess = false;
             renderError(error);
         } finally {
