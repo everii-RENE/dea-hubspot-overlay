@@ -1,6 +1,6 @@
 // ==UserScript==
 // @name         [DEA] HubSpot Overlay Customizer
-// @version      6.2.1
+// @version      6.2.2
 // @updateURL    https://raw.githubusercontent.com/everii-RENE/dea-hubspot-overlay/master/dea-hubspot-overlay.user.js
 // @downloadURL  https://raw.githubusercontent.com/everii-RENE/dea-hubspot-overlay/master/dea-hubspot-overlay.user.js
 // @description  Stable release: compact DEA / clone / terminal / YouTrack / GitHub bar for HubSpot
@@ -706,6 +706,19 @@ if (typeof GM_registerMenuCommand === 'function') {
         '</rect></clipPath></defs>' +
         '<image width="24" height="24" href="' + CLONE_NOT_RUNNING_ICON + '" xlink:href="' + CLONE_NOT_RUNNING_ICON + '"/>' +
         '<image width="24" height="24" clip-path="url(#fill)" href="' + CLONE_RUNNING_ICON + '" xlink:href="' + CLONE_RUNNING_ICON + '"/>' +
+        '</svg>'
+    );
+    // Lösch-Icon: graues T, das sich langsam von unten nach oben rot füllt
+    // (Rot per Farbmatrix aus dem Grün des T), danach beginnt es von vorn.
+    const CLONE_DELETING_ICON = 'data:image/svg+xml;charset=UTF-8,' + encodeURIComponent(
+        '<svg xmlns="http://www.w3.org/2000/svg" xmlns:xlink="http://www.w3.org/1999/xlink" viewBox="0 0 24 24">' +
+        '<defs><filter id="red" color-interpolation-filters="sRGB"><feColorMatrix type="matrix" values="0.6 0.6 0 0 0  0.1 0 0 0 0  0 0 0 0 0  0 0 0 1 0"/></filter>' +
+        '<clipPath id="fill"><rect x="0" width="24" y="24" height="0">' +
+        '<animate attributeName="y" values="24;0;0" keyTimes="0;0.85;1" dur="3s" repeatCount="indefinite"/>' +
+        '<animate attributeName="height" values="0;24;24" keyTimes="0;0.85;1" dur="3s" repeatCount="indefinite"/>' +
+        '</rect></clipPath></defs>' +
+        '<image width="24" height="24" href="' + CLONE_NOT_RUNNING_ICON + '" xlink:href="' + CLONE_NOT_RUNNING_ICON + '"/>' +
+        '<g clip-path="url(#fill)"><image width="24" height="24" filter="url(#red)" href="' + CLONE_RUNNING_ICON + '" xlink:href="' + CLONE_RUNNING_ICON + '"/></g>' +
         '</svg>'
     );
     const CLONE_PROGRESS_ICON = 'data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAABgAAAAYCAYAAADgdz34AAAD1klEQVR42tVVX2hbVRj/vnPubRJiL1lLRSIiWNxcY1VUtOimFxUE++DwTVQwLclNCza+9MWXey8+FSysrCY5SSFvjjUy8UUQprZTmHtZt7FIEVlHt6XdWhKbYNOmzfl8uZG7LAl1+OJ5PN93vu87vz/nAPzfF+8UJCIMhUJ8YGCALywskG3bQEQIAEzXdVxcXHzwzvPz8/wgeaZpsk5x7BScmprq7uvrewMR36rValnDMC5lMpn3AKC7Xq+vIOIVwzC2OtVQmiGxLAuDwWA3AHzMOf9EUZT+3t5eWF1d/REALkkp+3w+3zeVSuURRVFOpNPp64FA4GI+n9+3bVs2N7jvek7SYa/Xe1LTtP6dnZ2N9fX1HOc87+C/sr29PYyIXFGU76SUb29tbR1yzmE7iJCIIJfLqfl8HmzbrgkhTnR1dR2v1WpfGIax5j40Ozv7EOf8WcbYECKeiUajt5LJ5KNjY2O3nZrUktBUKnUqk8mcy2QyPc1xZ/qGiu5Zc3NzTwshPhdCvNJMPJqmyWzblolE4oiiKFcDgUBXsVj8aG1t7auenh51YmKihojUTj3BYJAT0aeIeBIRP6hWq2fj8Xj5Hw50XWcAAJzzDzVN48Vi8bLH4/nasiyKx+Mti7u4AsMw9hDxAmPsKBH97PV6n3EPwHRdrzsQva9pGgeAXDgc3rEsi9+HZZsm5XJ5CQBe8Pv9+4h49B4VISKVSiUGAKc2Nzc/Y4yddoiSBzEaEeHk5ORfAPA753yIiFYAACzLov/yycGOgWw2693d3X3H6/WyWq32azQavU1E0A7/5hsgIiWTyZc0TXusUqlsxGKx8439hpy8iNhHRNfq9frrAECWZeGBRkeE6elpHwAM1uv1KwDwlAMRAgAw0zRZOBz+ExFL4XB4GRH3s9lsoJXt20iV/H7/c4yxpXK5vAcAy+2eilUhxMuMsaW9vb1hIkIhhNrKWI3ioVAIhRAqABwrFAqXVVXVPR7PVbfC0J1cKpXCAOBXVfXsyMjITTcSDU4axnQ3E0I8T0TvAsAPsVjsvDsHXWRTIpE4pKpqVyQSuZNIJI4rihJCxHORSOQPd8GZmRmPx+MZBIBjnPPTkUjkjhCiv1AorNi2TW7/tLx+KpV6DQAGpZQ5zvkQADwMAD9Fo9Hr6XRaR8QnpJS/IeINIopJKb8cHx+/26oWa8bVNE0mpVwGgE1FUV6tVqsXEfEaY+yII9vDRPStlLJIRG8S0S8+n6/sEI4dPxwXtncB4EwymXzS5/O9yBh7HAAuOLEiY2yYc34LEb8fHR3deCBntlPPv/2T/wbd+8Un6gkbJwAAAABJRU5ErkJggg==';
@@ -2395,12 +2408,20 @@ if (typeof GM_registerMenuCommand === 'function') {
         if (running && cloneDeploymentId && pendingCloneIds.has(cloneDeploymentId)) {
             stopCloneStatePolling(cloneDeploymentId);
         }
-        const showSpinner = !running && cloneDeploymentId && pendingCloneIds.has(cloneDeploymentId);
-        const icon = running ? CLONE_RUNNING_ICON : (showSpinner ? CLONE_LOADING_ICON : CLONE_NOT_RUNNING_ICON);
+        const isDeleting = Boolean(cloneDeploymentId) && deletePollers.has(cloneDeploymentId);
+        const showSpinner = !running && !isDeleting && cloneDeploymentId && pendingCloneIds.has(cloneDeploymentId);
+        const icon = isDeleting
+            ? CLONE_DELETING_ICON
+            : (running ? CLONE_RUNNING_ICON : (showSpinner ? CLONE_LOADING_ICON : CLONE_NOT_RUNNING_ICON));
         const wrapper = document.createElement('span');
         // Ladendes T: Klick öffnet die Progress-Seite statt die Leiste neu zu laden.
         const activateIcon = () => {
-            if (showSpinner) {
+            if (isDeleting) {
+                const now = Date.now();
+                if (now - (activateIcon.last || 0) < 600) return;
+                activateIcon.last = now;
+                window.open(getDeleteTargetUrl(cloneDeploymentId), '_blank', 'noopener,noreferrer');
+            } else if (showSpinner) {
                 const now = Date.now();
                 if (now - (activateIcon.last || 0) < 600) return; // pointerdown + click entprellen
                 activateIcon.last = now;
@@ -2438,6 +2459,19 @@ if (typeof GM_registerMenuCommand === 'function') {
             link.title = title;
             link.setAttribute('aria-label', title);
             link.setAttribute('aria-haspopup', 'menu');
+            if (isDeleting) {
+                // Rotes T: Link zeigt auf die Lösch-Operation statt auf den Clone.
+                // Der href wird sofort gesetzt und vor jeder Interaktion erneuert,
+                // damit auch der native Browser-Klick (neuer Tab) dorthin geht.
+                link.dataset.deleteId = cloneDeploymentId;
+                link.href = getDeleteTargetUrl(cloneDeploymentId);
+                link.title = 'Löschung läuft - Klick öffnet die Operation';
+                link.setAttribute('aria-label', link.title);
+                const refreshHref = () => { link.href = getDeleteTargetUrl(cloneDeploymentId); };
+                ['mouseenter', 'focus', 'pointerdown', 'mousedown', 'click'].forEach(type => {
+                    link.addEventListener(type, refreshHref, true);
+                });
+            }
             const image = document.createElement('img');
             image.src = icon;
             image.alt = '';
@@ -4024,6 +4058,40 @@ if (typeof GM_registerMenuCommand === 'function') {
 
     // --- Delete-Polling: wartet, bis die Teambox nicht mehr existiert ---------
     const deletePollers = new Map();
+    // Operation, die die Löschung der jeweiligen Teambox ausführt (id -> URL).
+    const deleteOperationUrls = new Map();
+
+    function getDeleteTargetUrl(deploymentId) {
+        return deleteOperationUrls.get(String(deploymentId)) ||
+            `${TOOL}/teamboxes/${encodeURIComponent(deploymentId)}`;
+    }
+
+    // Sucht in der Antwort die Operation der Löschung: bevorzugt den Toast
+    // "Deletion of Teambox ... scheduled as Operation #N", sonst die neueste
+    // Operation, die auf der Teambox-Seite verlinkt ist.
+    function rememberDeleteOperation(deploymentId, html) {
+        const id = String(deploymentId);
+        let url = null;
+        const toast = /Deletion of Teambox[\s\S]{0,300}?scheduled as[\s\S]{0,200}?href="([^"]*\/operations\/\d+)[^"]*"/i.exec(html);
+        if (toast) {
+            url = toast[1];
+            deleteOperationUrls.set(`${id}:toast`, '1');
+        } else if (!deleteOperationUrls.has(`${id}:toast`)) {
+            let best = -1;
+            const re = /href="([^"]*\/operations\/(\d+))(?:[/?#"][^"]*)?"/gi;
+            let m;
+            while ((m = re.exec(html))) {
+                if (Number(m[2]) > best) { best = Number(m[2]); url = m[1]; }
+            }
+        }
+        if (!url) return;
+        try {
+            const href = new URL(url, TOOL).href;
+            deleteOperationUrls.set(id, href);
+            document.querySelectorAll(`a[data-delete-id="${id}"]`).forEach(link => { link.href = href; });
+        } catch (error) { /* ignorieren */ }
+    }
+
     const DELETE_POLL_INTERVAL_MS = 1000;
     const DELETE_POLL_TIMEOUT_MS = 15 * 60 * 1000;
 
@@ -4037,7 +4105,14 @@ if (typeof GM_registerMenuCommand === 'function') {
                 timeout: 8000,
                 onload: res => {
                     const text = String(res.responseText || '');
-                    resolve(res.status === 404 || /The requested resource does not exist/i.test(text));
+                    rememberDeleteOperation(deploymentId, text);
+                    // Enthält die Antwort noch die Teambox-Detailseite, existiert sie
+                    // sicher noch - auch wenn ein alter Flash-Hinweis ("does not
+                    // exist") aus der Session mitgeliefert wird.
+                    const stillThere = text.indexOf(`teambox_${deploymentId}`) !== -1 ||
+                        /<dt[^>]*>\s*State:/i.test(text);
+                    resolve(!stillThere &&
+                        (res.status === 404 || /The requested resource does not exist/i.test(text)));
                 },
                 onerror: () => resolve(false),
                 ontimeout: () => resolve(false)
@@ -4059,7 +4134,8 @@ if (typeof GM_registerMenuCommand === 'function') {
             }
             busy = true;
             try {
-                if (await checkTeamboxGone(id)) {
+                // Mindestens ein Animationsdurchlauf (3 s) bleibt das rote T sichtbar.
+                if (Date.now() - startedAt >= 3000 && await checkTeamboxGone(id)) {
                     window.clearInterval(timer);
                     deletePollers.delete(id);
                     // Nur die Leiste neu laden, nicht den Tab.
@@ -4071,6 +4147,13 @@ if (typeof GM_registerMenuCommand === 'function') {
             }
         }, DELETE_POLL_INTERVAL_MS);
         deletePollers.set(id, timer);
+        // Leiste ohne Neuladen aus den vorhandenen Daten neu zeichnen, damit das
+        // T sofort die Lösch-Animation zeigt.
+        try {
+            if (state.data && canRenderDea()) renderData(state.data);
+        } catch (error) {
+            log('Could not redraw bar for delete animation', error);
+        }
     }
 
     // --- Clone-Status-Polling (ersetzt den Progress-Tab) -------------------
@@ -4127,10 +4210,17 @@ if (typeof GM_registerMenuCommand === 'function') {
             try {
                 const pageState = await fetchTeamboxPageState(id);
                 if (pageState && /running/i.test(pageState)) {
-                    // Nur die Leiste neu laden; Polling endet, sobald die Leiste
-                    // den Clone als "running" rendert (siehe addCloneStateIcon).
+                    // Polling sofort beenden (sonst lädt die Leiste endlos neu, falls
+                    // die DEA-API den Clone nicht unter derselben ID als "running"
+                    // meldet). Danach nur Leiste neu laden - einmal sofort und
+                    // einmal verzögert, falls die API dem Tool kurz hinterherhinkt.
+                    stopCloneStatePolling(id);
                     lastOverlayReloadAt = 0;
                     reloadOverlay();
+                    window.setTimeout(() => {
+                        lastOverlayReloadAt = 0;
+                        reloadOverlay();
+                    }, 2500);
                 }
             } finally {
                 busy = false;
