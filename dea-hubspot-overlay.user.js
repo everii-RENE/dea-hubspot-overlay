@@ -1347,6 +1347,44 @@ if (typeof GM_registerMenuCommand === 'function') {
                 cursor: pointer !important;
             }
 
+            #${BAR_ID} .dea-sync-button {
+                pointer-events: auto !important;
+                width: 22px !important;
+                height: 22px !important;
+                min-width: 22px !important;
+                padding: 0 !important;
+                margin: 0 0 0 4px !important;
+                border: 0 !important;
+                background: transparent !important;
+                display: inline-flex !important;
+                align-items: center !important;
+                justify-content: center !important;
+                cursor: pointer !important;
+                opacity: 0.85 !important;
+            }
+
+            #${BAR_ID} .dea-sync-button:hover,
+            #${BAR_ID} .dea-sync-button:focus-visible {
+                opacity: 1 !important;
+            }
+
+            #${BAR_ID} .dea-sync-button:focus-visible {
+                outline: 2px solid #ffffff !important;
+                outline-offset: 2px !important;
+                border-radius: 2px !important;
+            }
+
+            #${BAR_ID} .dea-sync-button .dea-sync-spinner {
+                width: 18px !important;
+                height: 18px !important;
+                display: block !important;
+                pointer-events: none !important;
+            }
+
+            #${BAR_ID} .dea-sync-button.is-syncing .dea-sync-spinner {
+                animation: dea-sync-spin 0.9s linear infinite !important;
+            }
+
             #${BAR_ID} .dea-reload-button {
                 margin-left: -4px !important;
                 transform: translateY(-1px) !important;
@@ -4599,6 +4637,45 @@ if (typeof GM_registerMenuCommand === 'function') {
         renderTeambox(bar, data, teambox);
     }
 
+    // Button am Ende der Fehlermeldung "Keine Teambox für dieses Ticket gefunden":
+    // startet den HubSpot-Sync (wie das rote Schloss) und lädt das Ticket danach neu.
+    function createSyncButton() {
+        const button = document.createElement('button');
+        button.type = 'button';
+        button.className = 'dea-sync-button';
+        button.title = 'HubSpot-Sync ausführen';
+        button.setAttribute('aria-label', button.title);
+        button.appendChild(createSyncSpinner());
+
+        const run = event => {
+            const keyboardActivation = event.type === 'keydown' &&
+                (event.key === 'Enter' || event.key === ' ' || event.code === 'Space');
+            const pointerActivation = event.type !== 'keydown' && isPlainLeftClick(event);
+            if (!keyboardActivation && !pointerActivation) return;
+            event.preventDefault();
+            event.stopPropagation();
+            if (typeof event.stopImmediatePropagation === 'function') {
+                event.stopImmediatePropagation();
+            }
+            if (syncNowActive || button.dataset.syncActivated === 'true') return;
+            button.dataset.syncActivated = 'true';
+            startSyncNow(button).finally(() => {
+                button.dataset.syncActivated = 'false';
+                button.classList.remove('is-syncing');
+                button.removeAttribute('aria-busy');
+                if (button.isConnected && !syncNowActive) {
+                    button.title = 'HubSpot-Sync ausführen';
+                    button.setAttribute('aria-label', button.title);
+                }
+            });
+        };
+        button.addEventListener('pointerdown', run, true);
+        button.addEventListener('mousedown', run, true);
+        button.addEventListener('click', run, true);
+        button.addEventListener('keydown', run, true);
+        return button;
+    }
+
     function renderData(data) {
         if (!canRenderDea()) {
             renderCustomerboxMode();
@@ -4614,6 +4691,7 @@ if (typeof GM_registerMenuCommand === 'function') {
             message.className = 'dea-error';
             message.textContent = 'Keine Teambox für dieses Ticket gefunden';
             bar.appendChild(message);
+            bar.appendChild(createSyncButton());
             return;
         }
         teamboxes.forEach((teambox, index) => {
