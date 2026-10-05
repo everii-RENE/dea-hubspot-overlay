@@ -1,6 +1,6 @@
 // ==UserScript==
 // @name         [DEA] HubSpot Overlay Customizer
-// @version      6.2.4
+// @version      6.2.5
 // @updateURL    https://raw.githubusercontent.com/everii-RENE/dea-hubspot-overlay/master/dea-hubspot-overlay.user.js
 // @downloadURL  https://raw.githubusercontent.com/everii-RENE/dea-hubspot-overlay/master/dea-hubspot-overlay.user.js
 // @description  Stable release: compact DEA / clone / terminal / YouTrack / GitHub bar for HubSpot
@@ -28,6 +28,9 @@
 
 const SETTINGS_KEY_CLONE_ACTION_MODE = 'dea_clone_action_mode';
 const SETTINGS_KEY_BAR_BACKGROUND = 'dea_bar_background';
+const SETTINGS_KEY_ROLE = 'dea_role';
+const ROLE_NORMAL = 'normal';
+const ROLE_SYSOP = 'sysop';
 const BAR_BACKGROUND_GRAU = '#333333';
 const BAR_BACKGROUND_BLAU = '#2d3e50';
 
@@ -54,6 +57,10 @@ function writePersistentSetting(key, value) {
 // Variante auswählen: 'dropdown' (Rechtsklick auf [TBX]-Icon) oder 'permanent' (dauerhaft angezeigt)
 const CLONE_ACTION_MODE = readPersistentSetting(SETTINGS_KEY_CLONE_ACTION_MODE, 'dropdown');
 
+// Rolle: 'normal' (Standard) oder 'sysop' (zusätzlich TablePlus + Terminal im DEA-Menü)
+const ROLE = readPersistentSetting(SETTINGS_KEY_ROLE, ROLE_NORMAL) === ROLE_SYSOP ? ROLE_SYSOP : ROLE_NORMAL;
+const IS_SYSOP = ROLE === ROLE_SYSOP;
+
 // Hintergrundfarbe auswählen
 const BAR_BACKGROUND = readPersistentSetting(SETTINGS_KEY_BAR_BACKGROUND, BAR_BACKGROUND_GRAU);
 
@@ -63,6 +70,13 @@ if (typeof GM_registerMenuCommand === 'function') {
         writePersistentSetting(SETTINGS_KEY_CLONE_ACTION_MODE, next);
         window.location.reload();
     });
+    GM_registerMenuCommand(
+        `Rolle umschalten (aktuell: ${IS_SYSOP ? 'Sysop' : 'Normal'})`,
+        () => {
+            writePersistentSetting(SETTINGS_KEY_ROLE, IS_SYSOP ? ROLE_NORMAL : ROLE_SYSOP);
+            window.location.reload();
+        }
+    );
     GM_registerMenuCommand(
         `Hintergrundfarbe umschalten (aktuell: ${BAR_BACKGROUND === BAR_BACKGROUND_GRAU ? 'grau' : 'blau'})`,
         () => {
@@ -2173,10 +2187,14 @@ if (typeof GM_registerMenuCommand === 'function') {
         }
     }
 
-    function getTeamboxDomainUrl(teamboxId) {
+    const DEA_DETAIL_HTML_CACHE = new Map();
+
+    // Loads the Teambox detail page once and shares the HTML between the
+    // domain and TablePlus lookups.
+    function fetchTeamboxDetailHtml(teamboxId) {
         const id = String(teamboxId || '').trim();
         if (!id) return Promise.resolve(null);
-        if (DEA_DOMAIN_URL_CACHE.has(id)) return DEA_DOMAIN_URL_CACHE.get(id);
+        if (DEA_DETAIL_HTML_CACHE.has(id)) return DEA_DETAIL_HTML_CACHE.get(id);
 
         const detailUrl = `${TOOL}/teamboxes/${encodeURIComponent(id)}`;
         const request = new Promise(resolve => {
@@ -2186,30 +2204,54 @@ if (typeof GM_registerMenuCommand === 'function') {
                 timeout: 30000,
                 withCredentials: true,
                 onload(response) {
-                    if (response.status < 200 || response.status >= 300) {
-                        resolve(null);
-                        return;
-                    }
-                    resolve(parseTeamboxDomainUrl(response.responseText, detailUrl));
+                    resolve(response.status >= 200 && response.status < 300 ? response.responseText : null);
                 },
-                onerror() {
-                    resolve(null);
-                },
-                ontimeout() {
-                    resolve(null);
-                },
-                onabort() {
-                    resolve(null);
-                }
+                onerror() { resolve(null); },
+                ontimeout() { resolve(null); },
+                onabort() { resolve(null); }
             });
-        }).then(domainUrl => {
-            // Do not permanently cache an unavailable result. A later
-            // render can then retry after the deployment tool is ready.
-            if (!domainUrl) DEA_DOMAIN_URL_CACHE.delete(id);
-            return domainUrl;
+        }).then(html => {
+            // Do not permanently cache an unavailable result.
+            if (!html) DEA_DETAIL_HTML_CACHE.delete(id);
+            return html;
         });
-        DEA_DOMAIN_URL_CACHE.set(id, request);
+        DEA_DETAIL_HTML_CACHE.set(id, request);
         return request;
+    }
+
+    function getTeamboxDomainUrl(teamboxId) {
+        const id = String(teamboxId || '').trim();
+        if (!id) return Promise.resolve(null);
+        const detailUrl = `${TOOL}/teamboxes/${encodeURIComponent(id)}`;
+        return fetchTeamboxDetailHtml(id).then(html => html ? parseTeamboxDomainUrl(html, detailUrl) : null);
+    }
+
+    // Reads the TablePlus link of the "MariaDB (full access)" box from the
+    // Teambox detail page. Example href:
+    // mariadb+ssh://user@host:2222/tbx-1:password@mariadb:1/tbx-1?name=...&usePrivateKey=true
+    function parseTeamboxTablePlusUrl(html) {
+        const doc = new DOMParser().parseFromString(String(html || ''), 'text/html');
+        const isDbLink = a => /^mariadb(?:\+ssh)?:\/\//i.test(String(a.getAttribute('href') || '').trim());
+        const fieldsets = Array.from(doc.querySelectorAll('fieldset'));
+        const fullAccess = fieldsets.find(fs => {
+            const legend = fs.querySelector('legend');
+            return legend && /mariadb\s*\(\s*full\s+access\s*\)/i.test(legend.textContent.replace(/\s+/g, ' '));
+        });
+        let link = fullAccess ? Array.from(fullAccess.querySelectorAll('a[href]')).find(isDbLink) : null;
+        if (!link) {
+            // Fallback: first MariaDB link that is not the read-only user.
+            link = Array.from(doc.querySelectorAll('a[href]')).find(a => {
+                if (!isDbLink(a)) return false;
+                const fs = a.closest('fieldset');
+                const legend = fs && fs.querySelector('legend');
+                return !(legend && /read-only/i.test(legend.textContent));
+            });
+        }
+        return link ? String(link.getAttribute('href')).trim() : null;
+    }
+
+    function getTeamboxTablePlusUrl(teamboxId) {
+        return fetchTeamboxDetailHtml(teamboxId).then(html => html ? parseTeamboxTablePlusUrl(html) : null);
     }
 
     function getRepositoryUrl(teambox, data) {
@@ -2858,7 +2900,7 @@ if (typeof GM_registerMenuCommand === 'function') {
         renderCustomerboxMode();
     }
 
-    function addDeaUpgradeDropdown(wrapper, link, target, teamboxId) {
+    function addDeaUpgradeDropdown(wrapper, link, target, teamboxId, teambox) {
         if (!wrapper || !link || !target) return null;
 
         const dropdown = document.createElement('span');
@@ -2878,6 +2920,29 @@ if (typeof GM_registerMenuCommand === 'function') {
         domainLink.dataset.deaDomainLoading = teamboxId ? 'true' : 'false';
         domainLink.classList.add('is-disabled');
 
+        // Sysop only: TablePlus (loaded from the detail page) and Terminal.
+        let tablePlusLink = null;
+        if (IS_SYSOP) {
+            tablePlusLink = addExternalAppLink(dropdown, {
+                href: '#',
+                icon: ICONS.tableplus,
+                title: teamboxId ? 'TablePlus wird geladen' : 'TablePlus nicht verfügbar'
+            });
+            tablePlusLink.classList.add('is-disabled');
+            tablePlusLink.addEventListener('click', event => {
+                if (tablePlusLink.classList.contains('is-disabled')) event.preventDefault();
+            }, true);
+
+            const terminalUrl = getCloneTerminalUrl(teambox, teamboxId);
+            if (terminalUrl) {
+                addIconLink(dropdown, {
+                    href: terminalUrl,
+                    icon: ICONS.terminal,
+                    title: 'Terminal öffnen'
+                });
+            }
+        }
+
         const customDeploymentLink = addIconLink(dropdown, {
             href: target,
             icon: ICONS.upgrade,
@@ -2895,6 +2960,21 @@ if (typeof GM_registerMenuCommand === 'function') {
                 activateOldStackView();
             }
         });
+
+        if (tablePlusLink && teamboxId) {
+            getTeamboxTablePlusUrl(teamboxId).then(url => {
+                if (!tablePlusLink.isConnected) return;
+                if (url) {
+                    tablePlusLink.href = url;
+                    tablePlusLink.title = 'TablePlus öffnen';
+                    tablePlusLink.setAttribute('aria-label', 'TablePlus öffnen');
+                    tablePlusLink.classList.remove('is-disabled');
+                } else {
+                    tablePlusLink.title = 'TablePlus nicht verfügbar';
+                    tablePlusLink.setAttribute('aria-label', 'TablePlus nicht verfügbar');
+                }
+            });
+        }
 
         if (teamboxId) {
             getTeamboxDomainUrl(teamboxId).then(domainUrl => {
@@ -2986,7 +3066,8 @@ if (typeof GM_registerMenuCommand === 'function') {
         serviceIcon = null,
         deaAction = false,
         currentTab = false,
-        cloneIndex = null
+        cloneIndex = null,
+        teambox = null
     }) {
         const link = document.createElement('a');
         if (serviceIcon) link.dataset.serviceIcon = serviceIcon;
@@ -3009,7 +3090,7 @@ if (typeof GM_registerMenuCommand === 'function') {
             const target = deaUrl ? `${deaUrl}/custom_deployment` : '';
             const teamboxId = getTeamboxIdFromToolUrl(deaUrl);
             iconHost.appendChild(link);
-            addDeaUpgradeDropdown(iconHost, link, target, teamboxId);
+            addDeaUpgradeDropdown(iconHost, link, target, teamboxId, teambox);
             link.__deaIconHost = iconHost;
         }
         // Route a normal icon click explicitly so the browser cannot perform
@@ -3168,7 +3249,7 @@ if (typeof GM_registerMenuCommand === 'function') {
         return link;
     }
 
-    function addBrandLink(parent, { href, icon, title, loading = false, customerboxLink = false }) {
+    function addBrandLink(parent, { href, icon, title, loading = false, customerboxLink = false, teambox = null }) {
         if (href) {
             return customerboxLink
                 ? addCustomerboxIconLink(parent, {
@@ -3181,7 +3262,8 @@ if (typeof GM_registerMenuCommand === 'function') {
                     href,
                     icon,
                     title,
-                    className: 'dea-brand'
+                    className: 'dea-brand',
+                    teambox
                 });
         }
 
@@ -3795,7 +3877,8 @@ if (typeof GM_registerMenuCommand === 'function') {
                 ? 'Customerbox-Link wird geladen'
                 : (isCustomerbox ? 'Customerbox Teambox öffnen' : `DEA Teambox ${customer}`),
             loading: isCustomerboxLoading,
-            customerboxLink: isCustomerbox
+            customerboxLink: isCustomerbox,
+            teambox
         });
 
         const context = document.createElement('span');
