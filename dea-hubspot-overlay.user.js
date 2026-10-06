@@ -1,6 +1,6 @@
 // ==UserScript==
 // @name         [DEA] HubSpot Overlay Customizer
-// @version      6.3.1
+// @version      6.3.2
 // @updateURL    https://raw.githubusercontent.com/everii-RENE/dea-hubspot-overlay/master/dea-hubspot-overlay.user.js
 // @downloadURL  https://raw.githubusercontent.com/everii-RENE/dea-hubspot-overlay/master/dea-hubspot-overlay.user.js
 // @description  Stable release: compact DEA / clone / terminal / YouTrack / GitHub bar for HubSpot
@@ -2286,7 +2286,7 @@ if (typeof GM_registerMenuCommand === 'function') {
                 return !(legend && /read-only/i.test(legend.textContent));
             });
         }
-        return link ? String(link.getAttribute('href')).trim() : null;
+        return link ? withTabbedWindowMode(link.getAttribute('href')) : null;
     }
 
     // The container/database name (for example "tbx-860") is the same one
@@ -2369,9 +2369,17 @@ if (typeof GM_registerMenuCommand === 'function') {
 
     // Same data contract as the HubSpot overlay: TablePlus is available
     // only when clone.tableplus.url is present.
+    // Hängt &windowMode=tabbed an MariaDB/TablePlus-Links an (nur einmal).
+    function withTabbedWindowMode(url) {
+        const value = String(url || '').trim();
+        if (!value) return null;
+        if (/[?&]windowMode=/i.test(value)) return value;
+        return value + (value.includes('?') ? '&' : '?') + 'windowMode=tabbed';
+    }
+
     function getCloneTablePlusUrl(clone) {
         const tableplus = clone && clone.tableplus;
-        return tableplus && tableplus.url ? tableplus.url : null;
+        return tableplus && tableplus.url ? withTabbedWindowMode(tableplus.url) : null;
     }
 
     function getCloneId(clone) {
