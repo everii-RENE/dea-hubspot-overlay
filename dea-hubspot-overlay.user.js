@@ -1,6 +1,6 @@
 // ==UserScript==
 // @name         [DEA] HubSpot Overlay Customizer
-// @version      6.3.7
+// @version      6.3.8
 // @updateURL    https://raw.githubusercontent.com/everii-RENE/dea-hubspot-overlay/master/dea-hubspot-overlay.user.js
 // @downloadURL  https://raw.githubusercontent.com/everii-RENE/dea-hubspot-overlay/master/dea-hubspot-overlay.user.js
 // @description  Stable release: compact DEA / clone / terminal / YouTrack / GitHub bar for HubSpot
@@ -2291,6 +2291,35 @@ if (typeof GM_registerMenuCommand === 'function') {
         return link ? withTabbedWindowMode(link.getAttribute('href')) : null;
     }
 
+    function addLogsErrorLevelFilter(logsUrl) {
+        const value = String(logsUrl || '').trim();
+        if (!value) return null;
+        const hashIndex = value.indexOf('#');
+        const hashQueryIndex = hashIndex >= 0 ? value.indexOf('?', hashIndex + 1) : -1;
+        let queryStart = -1;
+        if (hashQueryIndex >= 0) {
+            // VictoriaLogs puts its UI query string after the hash route: #/?step=...&query=...
+            queryStart = hashQueryIndex + 1;
+        } else {
+            const queryIndex = value.indexOf('?', value.indexOf('://') + 3);
+            if (queryIndex >= 0 && (hashIndex < 0 || queryIndex < hashIndex)) queryStart = queryIndex + 1;
+        }
+        if (queryStart < 0) return value;
+
+        const params = new URLSearchParams(value.slice(queryStart));
+        const currentQuery = String(params.get('query') || '').trim();
+        const filter = 'level:~"(?i)^(error|fatal|critical|panic)$"';
+        if (!/level:\s*~\s*["']\(\?i\)\^\(error\|fatal\|critical\|panic\)\$["']/i.test(currentQuery)) {
+            params.set('query', currentQuery ? `${currentQuery} and ${filter}` : filter);
+        }
+        // Force the VMUI time range to the full rolling seven days, ending now.
+        params.set('step', '3h');
+        params.set('g0.range_input', '7d');
+        params.set('g0.relative_time', 'last_7_days');
+        params.set('g0.end_input', new Date().toISOString());
+        return `${value.slice(0, queryStart)}${params.toString()}`;
+    }
+
     // Reads the actual "Logs" anchor from Monitoring > Teambox on the
     // deployment tool detail page. This preserves its exact query and time range.
     function parseTeamboxLogsUrl(html, detailUrl) {
@@ -2313,16 +2342,16 @@ if (typeof GM_registerMenuCommand === 'function') {
             });
             const link = teamboxRow && Array.from(teamboxRow.querySelectorAll('a[href]')).find(isLogsLink);
             if (link) {
-                try { return new URL(link.getAttribute('href'), detailUrl).href; }
-                catch (error) { return link.getAttribute('href'); }
+                try { return addLogsErrorLevelFilter(new URL(link.getAttribute('href'), detailUrl).href); }
+                catch (error) { return addLogsErrorLevelFilter(link.getAttribute('href')); }
             }
         }
 
         // Fallback for a detail page whose Monitoring block has a changed wrapper.
         const fallback = Array.from(doc.querySelectorAll('a[href]')).find(isLogsLink);
         if (!fallback) return null;
-        try { return new URL(fallback.getAttribute('href'), detailUrl).href; }
-        catch (error) { return fallback.getAttribute('href'); }
+        try { return addLogsErrorLevelFilter(new URL(fallback.getAttribute('href'), detailUrl).href); }
+        catch (error) { return addLogsErrorLevelFilter(fallback.getAttribute('href')); }
     }
 
     function getTeamboxLogsUrl(teamboxId) {
