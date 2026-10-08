@@ -1,11 +1,12 @@
 // ==UserScript==
 // @name         [DEA] HubSpot Overlay Customizer
-// @version      6.4.7
+// @version      6.4.9
 // @updateURL    https://raw.githubusercontent.com/everii-RENE/dea-hubspot-overlay/master/dea-hubspot-overlay.user.js
 // @downloadURL  https://raw.githubusercontent.com/everii-RENE/dea-hubspot-overlay/master/dea-hubspot-overlay.user.js
 // @description  Stable release: compact DEA / clone / terminal / YouTrack / GitHub bar for HubSpot
 // @author       RENE
 // @match        https://app-eu1.hubspot.com/*
+// @match        https://teambox.everii.io/app/simpletime/*
 // @match        https://production.teambox-deployment-tool.service.de1.everii/teamboxes/*/delete
 // @match        https://production.teambox-deployment-tool.service.de1.everii/teamboxes/*/custom_deployment
 // @match        https://production.teambox-deployment-tool.service.de1.everii/teamboxes/*
@@ -102,6 +103,24 @@ if (typeof GM_registerMenuCommand === 'function') {
     const DEBUG = false;
     function log(...args) {
         if (DEBUG) console.debug(...args);
+    }
+
+    const SIMPLETIME_BASE_URL = 'https://teambox.everii.io/app/simpletime/';
+    const SIMPLETIME_CUSTOMER_PARAM = 'dea_teambox';
+
+    function getSimpleTimeUrl(customerShortCode) {
+        const target = new URL(SIMPLETIME_BASE_URL);
+        const shortCode = String(customerShortCode || '').trim();
+        if (shortCode && shortCode !== 'Teambox') {
+            target.searchParams.set(SIMPLETIME_CUSTOMER_PARAM, shortCode);
+        }
+        return target.href;
+    }
+
+    function getSimpleTimeTargetProject(customerShortCode) {
+        const shortCode = String(customerShortCode || '').trim();
+        if (!shortCode) return '';
+        return /^TEAMBOX\./i.test(shortCode) ? shortCode : `TEAMBOX.${shortCode}`;
     }
 
     // Temporäres Timing-Log für die Performance-Analyse des Ticket-Ladevorgangs.
@@ -647,6 +666,220 @@ if (typeof GM_registerMenuCommand === 'function') {
         } else {
             start();
         }
+    }
+
+    function isVisibleElement(element) {
+        if (!element || element.hidden || !element.getClientRects().length) return false;
+        const style = window.getComputedStyle(element);
+        return style.display !== 'none' && style.visibility !== 'hidden';
+    }
+
+    function normalizeSimpleTimeText(value) {
+        return String(value || '').replace(/\s+/g, ' ').trim();
+    }
+
+    function getSimpleTimeProjectDescription(element) {
+        if (!element) return '';
+        const nodes = [element, ...Array.from(element.querySelectorAll('*'))];
+        const descriptions = [];
+        for (const node of nodes) {
+            for (const attribute of ['ext:qtip', 'title', 'data-qtip']) {
+                const value = node.getAttribute && node.getAttribute(attribute);
+                if (value) descriptions.push(value.replace(/<br\s*\/?\s*>/gi, '\n'));
+            }
+        }
+        descriptions.push(element.innerText || element.textContent || '');
+        return descriptions.join('\n').replace(/\u00a0/g, ' ').trim();
+    }
+
+    function isSimpleTimeTargetProject(element, projectName) {
+        const target = normalizeSimpleTimeText(projectName).toLocaleLowerCase();
+        if (!element || !target) return false;
+        const description = getSimpleTimeProjectDescription(element);
+        const projectLabel = description.match(/(?:^|\n)\s*Projekt\s*:\s*([^\n<]+)/i);
+        if (projectLabel) {
+            return normalizeSimpleTimeText(projectLabel[1]).toLocaleLowerCase() === target;
+        }
+        const parts = description.split(/[\s|<>‹›()[\]]+/).filter(Boolean);
+        return parts.some(part => part.toLocaleLowerCase() === target);
+    }
+
+    function getSimpleTimeProjectRows(projectName) {
+        return Array.from(document.querySelectorAll('.job-entry'))
+            .filter(isVisibleElement)
+            .map(entry => ({
+                entry,
+                selector: entry.querySelector('span.job-select'),
+                description: getSimpleTimeProjectDescription(entry)
+            }))
+            .filter(row => row.selector && isSimpleTimeTargetProject(row.entry, projectName));
+    }
+
+    function isSelectedSimpleTimeProject(projectName) {
+        const candidates = Array.from(document.querySelectorAll('.job-value, .job-selector-wrap .job-select'))
+            .filter(element => !element.closest('.job-entry'));
+        return candidates.some(element => isSimpleTimeTargetProject(element, projectName));
+    }
+
+    function getSimpleTimeProjectInput() {
+        return Array.from(document.querySelectorAll('input[placeholder="Suche (Projekt)"], input[placeholder*="Projekt"]'))
+            .find(isVisibleElement) || null;
+    }
+
+    function setSimpleTimeSearch(input, value) {
+        if (!input) return false;
+        input.focus();
+        const setter = Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'value')?.set;
+        if (setter) setter.call(input, value);
+        else input.value = value;
+        input.dispatchEvent(new Event('input', { bubbles: true }));
+        input.dispatchEvent(new Event('change', { bubbles: true }));
+        input.dispatchEvent(new KeyboardEvent('keyup', {
+            bubbles: true,
+            key: 'e',
+            code: 'KeyE'
+        }));
+        return true;
+    }
+
+    function openSimpleTimeProjectList() {
+        const visibleLabels = Array.from(document.querySelectorAll('button, [role="button"], .icon-btn'))
+            .filter(isVisibleElement);
+        const customerListToggle = visibleLabels.find(element =>
+            normalizeSimpleTimeText(element.innerText || element.textContent).toLowerCase() === 'kundenliste' ||
+            normalizeSimpleTimeText(element.getAttribute('title')).toLowerCase() === 'kundenliste'
+        );
+        if (customerListToggle) {
+            customerListToggle.click();
+            return true;
+        }
+
+        const activeSelector = Array.from(document.querySelectorAll('.job-selector-wrap'))
+            .find(isVisibleElement);
+        if (!activeSelector) return false;
+        const trigger = activeSelector.querySelector('.icon-btn, .x-form-trigger, button, [role="button"]');
+        if (!trigger || !isVisibleElement(trigger)) return false;
+        trigger.click();
+        return true;
+    }
+
+    function showSimpleTimeAutomationStatus(message, isError = false) {
+        const id = 'dea-simpletime-automation-status';
+        let status = document.getElementById(id);
+        if (!status) {
+            status = document.createElement('div');
+            status.id = id;
+            status.setAttribute('role', 'status');
+            status.style.cssText = [
+                'position:fixed', 'z-index:2147483647', 'right:12px', 'top:12px',
+                'max-width:360px', 'padding:10px 14px', 'border-radius:4px',
+                'font:14px/1.4 Arial,sans-serif', 'box-shadow:0 2px 10px rgba(0,0,0,.2)'
+            ].join(';');
+            document.body.appendChild(status);
+        }
+        status.style.background = isError ? '#fff1f0' : '#f0f7f1';
+        status.style.color = isError ? '#7f1d1d' : '#23452a';
+        status.style.border = `1px solid ${isError ? '#dc2626' : '#4b7f51'}`;
+        status.textContent = message;
+        if (!isError) window.setTimeout(() => status.remove(), 4500);
+    }
+
+    function removeSimpleTimeCustomerParameter() {
+        try {
+            const cleanUrl = new URL(window.location.href);
+            cleanUrl.searchParams.delete(SIMPLETIME_CUSTOMER_PARAM);
+            window.history.replaceState(window.history.state, document.title,
+                `${cleanUrl.pathname}${cleanUrl.search}${cleanUrl.hash}`);
+        } catch (error) {
+            log('Could not remove SimpleTime handoff parameter', error);
+        }
+    }
+
+    async function initializeSimpleTimeAutomation() {
+        const currentUrl = new URL(window.location.href);
+        const customerShortCode = String(currentUrl.searchParams.get(SIMPLETIME_CUSTOMER_PARAM) || '').trim();
+        const targetProject = getSimpleTimeTargetProject(customerShortCode);
+        if (!customerShortCode || !targetProject) return;
+
+        if (isSelectedSimpleTimeProject(targetProject)) {
+            removeSimpleTimeCustomerParameter();
+            showSimpleTimeAutomationStatus(`${targetProject} ist bereits ausgewählt.`);
+            return;
+        }
+
+        let input = await pollUntil(getSimpleTimeProjectInput, { intervalMs: 200, timeoutMs: 7000 });
+        if (!input) {
+            openSimpleTimeProjectList();
+            input = await pollUntil(getSimpleTimeProjectInput, { intervalMs: 200, timeoutMs: 5000 });
+        }
+        if (!input) {
+            showSimpleTimeAutomationStatus('SimpleTime: Das Projekt-Suchfeld wurde nicht gefunden. Bitte Projekt manuell wählen.', true);
+            removeSimpleTimeCustomerParameter();
+            return;
+        }
+
+        // First filter the project list by the Teambox short code from the DEA bar.
+        setSimpleTimeSearch(input, customerShortCode);
+        await new Promise(resolve => window.setTimeout(resolve, 350));
+        let rows = await pollUntil(() => {
+            const matchingRows = getSimpleTimeProjectRows(targetProject);
+            if (!matchingRows.length) return false;
+            const codeMatches = matchingRows.filter(row =>
+                row.description.toLocaleLowerCase().includes(customerShortCode.toLocaleLowerCase())
+            );
+            return codeMatches.length === 1 ? codeMatches[0] : (matchingRows.length === 1 ? matchingRows[0] : false);
+        }, { intervalMs: 200, timeoutMs: 2500 });
+
+        // Resolve the code-specific project. If filtering by the short code does not expose it,
+        // search the exact TEAMBOX.<short code> name and require an unambiguous result.
+        if (!rows) {
+            input = getSimpleTimeProjectInput();
+            if (input) setSimpleTimeSearch(input, targetProject);
+            await new Promise(resolve => window.setTimeout(resolve, 350));
+            rows = await pollUntil(() => {
+                const matchingRows = getSimpleTimeProjectRows(targetProject);
+                if (matchingRows.length === 1) return matchingRows[0];
+                const codeMatches = matchingRows.filter(row =>
+                    row.description.toLocaleLowerCase().includes(customerShortCode.toLocaleLowerCase())
+                );
+                return codeMatches.length === 1 ? codeMatches[0] : false;
+            }, { intervalMs: 200, timeoutMs: 6000 });
+        }
+
+        if (!rows || !rows.selector) {
+            showSimpleTimeAutomationStatus(
+                `SimpleTime: ${targetProject} wurde für „${customerShortCode}“ nicht eindeutig gefunden. Bitte manuell auswählen.`,
+                true
+            );
+            removeSimpleTimeCustomerParameter();
+            return;
+        }
+
+        rows.selector.click();
+        const selected = await pollUntil(
+            () => isSelectedSimpleTimeProject(targetProject),
+            { intervalMs: 200, timeoutMs: 5000 }
+        );
+
+        if (selected) {
+            showSimpleTimeAutomationStatus(`${targetProject} wurde ausgewählt.`);
+        } else {
+            showSimpleTimeAutomationStatus(
+                `SimpleTime: Der Klick auf ${targetProject} wurde gesendet, aber die Auswahl ließ sich im Seitenzustand nicht bestätigen. Bitte prüfen.`,
+                true
+            );
+        }
+        removeSimpleTimeCustomerParameter();
+    }
+
+    if (window.location.hostname === 'teambox.everii.io' &&
+        /^\/app\/simpletime(?:\/|$)/i.test(window.location.pathname)) {
+        initializeSimpleTimeAutomation().catch(error => {
+            log('SimpleTime automation failed', error);
+            showSimpleTimeAutomationStatus('SimpleTime-Automatisierung fehlgeschlagen. Bitte Projekt manuell wählen.', true);
+            removeSimpleTimeCustomerParameter();
+        });
+        return;
     }
 
     if (CUSTOM_DEPLOYMENT_PAGE_PATTERN.test(window.location.pathname)) {
@@ -4388,7 +4621,7 @@ if (typeof GM_registerMenuCommand === 'function') {
             addGithubModulesMenu(links, githubLink);
             if (IS_STEVEN) {
                 addModeIconLink(links, {
-                    href: 'https://teambox.everii.io/app/simpletime/',
+                    href: getSimpleTimeUrl(customer),
                     icon: ICONS.simpletime,
                     title: 'SimpleTime öffnen',
                     serviceIcon: 'simpletime',
