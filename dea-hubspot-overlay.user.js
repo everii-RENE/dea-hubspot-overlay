@@ -1,6 +1,6 @@
 // ==UserScript==
 // @name         [DEA] HubSpot Overlay Customizer
-// @version      6.4.18
+// @version      6.4.31
 // @updateURL    https://raw.githubusercontent.com/everii-RENE/dea-hubspot-overlay/master/dea-hubspot-overlay.user.js
 // @downloadURL  https://raw.githubusercontent.com/everii-RENE/dea-hubspot-overlay/master/dea-hubspot-overlay.user.js
 // @description  Stable release: compact DEA / clone / terminal / YouTrack / GitHub bar for HubSpot
@@ -30,6 +30,7 @@
 const SETTINGS_KEY_CLONE_ACTION_MODE = 'dea_clone_action_mode';
 const SETTINGS_KEY_BAR_BACKGROUND = 'dea_bar_background';
 const SETTINGS_KEY_ROLE = 'dea_role';
+const SETTINGS_KEY_SIMPLETIME_DEBUG = 'dea_simpletime_debug';
 const ROLE_NORMAL = 'normal';
 const ROLE_SYSOP = 'sysop';
 const ROLE_STEVEN = 'steven';
@@ -54,6 +55,11 @@ function writePersistentSetting(key, value) {
     } catch (error) {
         // Einstellung kann nicht gespeichert werden; betrifft nur den Komfort-Schalter.
     }
+}
+
+const SIMPLETIME_DEBUG = readPersistentSetting(SETTINGS_KEY_SIMPLETIME_DEBUG, false) === true;
+function simpleTimeDiagnostic(event, details = '') {
+    if (SIMPLETIME_DEBUG) console.debug(`[DEA SimpleTime] ${event}`, details);
 }
 
 // Variante auswählen: 'dropdown' (Rechtsklick auf [TBX]-Icon) oder 'permanent' (dauerhaft angezeigt)
@@ -92,6 +98,13 @@ if (typeof GM_registerMenuCommand === 'function') {
             window.location.reload();
         }
     );
+    GM_registerMenuCommand(
+        `SimpleTime-Diagnose ${SIMPLETIME_DEBUG ? 'ausschalten' : 'einschalten'}`,
+        () => {
+            writePersistentSetting(SETTINGS_KEY_SIMPLETIME_DEBUG, !SIMPLETIME_DEBUG);
+            window.location.reload();
+        }
+    );
 }
 
 
@@ -107,12 +120,18 @@ if (typeof GM_registerMenuCommand === 'function') {
 
     const SIMPLETIME_BASE_URL = 'https://teambox.everii.io/app/simpletime/';
     const SIMPLETIME_CUSTOMER_PARAM = 'dea_teambox';
+    const SIMPLETIME_HUBSPOT_ID_PARAM = 'dea_hubspot_id';
+    const SIMPLETIME_OPEN_STORAGE_KEY = 'dea_simpletime_dropdown_open';
 
-    function getSimpleTimeUrl(customerShortCode) {
+    function getSimpleTimeUrl(customerShortCode, hubspotId) {
         const target = new URL(SIMPLETIME_BASE_URL);
         const shortCode = String(customerShortCode || '').trim();
         if (shortCode && shortCode !== 'Teambox') {
             target.searchParams.set(SIMPLETIME_CUSTOMER_PARAM, shortCode);
+        }
+        const recordId = String(hubspotId || '').trim();
+        if (/^\d+$/.test(recordId)) {
+            target.searchParams.set(SIMPLETIME_HUBSPOT_ID_PARAM, recordId);
         }
         return target.href;
     }
@@ -726,6 +745,89 @@ if (typeof GM_registerMenuCommand === 'function') {
             .find(isVisibleElement) || null;
     }
 
+    function getSimpleTimeInformationField() {
+        const fields = Array.from(document.querySelectorAll('textarea')).filter(isVisibleElement);
+        if (!fields.length) return null;
+
+        const hasInformationHint = field => {
+            const id = field.id || '';
+            const labels = id
+                ? Array.from(document.querySelectorAll('label[for]'))
+                    .filter(label => label.htmlFor === id)
+                    .map(label => label.innerText || label.textContent || '')
+                : [];
+            const emptyText = field.classList.contains('x-form-empty-field') ? field.value : '';
+            const hints = [
+                field.getAttribute('placeholder'),
+                field.getAttribute('aria-label'),
+                field.getAttribute('title'),
+                field.getAttribute('data-qtip'),
+                ...labels,
+                emptyText
+            ].filter(Boolean).join(' ');
+            return /\binformation\b/i.test(hints);
+        };
+
+        const explicitlyNamed = fields.filter(hasInformationHint);
+        if (explicitlyNamed.length === 1) return explicitlyNamed[0];
+        if (explicitlyNamed.length > 1) {
+            const extNamed = explicitlyNamed.filter(field => field.classList.contains('x-form-textarea'));
+            if (extNamed.length === 1) return extNamed[0];
+            return null;
+        }
+
+        // SimpleTime uses ExtJS textareas. When the field's empty-text label
+        // is rendered as a CSS class instead of a placeholder attribute, it
+        // is still safe to use a unique visible ExtJS textarea.
+        const extTextareas = fields.filter(field => field.classList.contains('x-form-textarea'));
+        if (extTextareas.length === 1) return extTextareas[0];
+        const emptyExtTextareas = extTextareas.filter(field => field.classList.contains('x-form-empty-field'));
+        return emptyExtTextareas.length === 1 ? emptyExtTextareas[0] : null;
+    }
+
+    function setSimpleTimeInformation(field, hubspotId) {
+        if (!field || !/^\d+$/.test(String(hubspotId || ''))) return false;
+        const id = String(hubspotId);
+        const entry = `HS:${id} `;
+        const currentValue = String(field.value || '');
+        const isEmptyText = field.classList.contains('x-form-empty-field') &&
+            normalizeSimpleTimeText(currentValue).toLowerCase() === 'information';
+
+        // Update an existing entry as well, so values written by earlier
+        // releases are corrected instead of duplicated.
+        if (!isEmptyText) {
+            const lines = currentValue.split(/\r?\n/);
+            const existingIndex = lines.findIndex(line => {
+                const match = line.trim().match(/^HS:\s*(\d+)\s*$/);
+                return match && match[1] === id;
+            });
+            if (existingIndex !== -1) {
+                if (lines[existingIndex] === entry) return true;
+                lines[existingIndex] = entry;
+                const setter = Object.getOwnPropertyDescriptor(HTMLTextAreaElement.prototype, 'value')?.set;
+                const nextValue = lines.join('\n');
+                if (setter) setter.call(field, nextValue);
+                else field.value = nextValue;
+                field.classList.remove('x-form-empty-field');
+                field.dispatchEvent(new Event('input', { bubbles: true }));
+                field.dispatchEvent(new Event('change', { bubbles: true }));
+                field.dispatchEvent(new KeyboardEvent('keyup', { bubbles: true, key: 'e', code: 'KeyE' }));
+                return true;
+            }
+        }
+
+        const content = isEmptyText ? '' : currentValue.trim();
+        const nextValue = content ? `${content}\n${entry}` : entry;
+        const setter = Object.getOwnPropertyDescriptor(HTMLTextAreaElement.prototype, 'value')?.set;
+        if (setter) setter.call(field, nextValue);
+        else field.value = nextValue;
+        field.classList.remove('x-form-empty-field');
+        field.dispatchEvent(new Event('input', { bubbles: true }));
+        field.dispatchEvent(new Event('change', { bubbles: true }));
+        field.dispatchEvent(new KeyboardEvent('keyup', { bubbles: true, key: 'e', code: 'KeyE' }));
+        return true;
+    }
+
     function setSimpleTimeSearch(input, value) {
         if (!input) return false;
         input.focus();
@@ -763,7 +865,9 @@ if (typeof GM_registerMenuCommand === 'function') {
         return true;
     }
 
-    function showSimpleTimeAutomationStatus(message, isError = false) {
+    function showSimpleTimeAutomationStatus(message, isError = true) {
+        if (!isError) return;
+        simpleTimeDiagnostic('automation error reported');
         const id = 'dea-simpletime-automation-status';
         let status = document.getElementById(id);
         if (!status) {
@@ -791,19 +895,28 @@ if (typeof GM_registerMenuCommand === 'function') {
             window.history.replaceState(window.history.state, document.title,
                 `${cleanUrl.pathname}${cleanUrl.search}${cleanUrl.hash}`);
         } catch (error) {
-            log('Could not remove SimpleTime handoff parameter', error);
+            log('Could not remove SimpleTime customer handoff parameter', error);
         }
     }
 
-    async function initializeSimpleTimeAutomation() {
-        const currentUrl = new URL(window.location.href);
-        const customerShortCode = String(currentUrl.searchParams.get(SIMPLETIME_CUSTOMER_PARAM) || '').trim();
-        const targetProject = getSimpleTimeTargetProject(customerShortCode);
+    function removeSimpleTimeHubspotIdParameter() {
+        try {
+            const cleanUrl = new URL(window.location.href);
+            cleanUrl.searchParams.delete(SIMPLETIME_HUBSPOT_ID_PARAM);
+            window.history.replaceState(window.history.state, document.title,
+                `${cleanUrl.pathname}${cleanUrl.search}${cleanUrl.hash}`);
+        } catch (error) {
+            log('Could not remove SimpleTime HubSpot ID handoff parameter', error);
+        }
+    }
+
+    async function initializeSimpleTimeProjectSelection(customerShortCode, targetProject) {
         if (!customerShortCode || !targetProject) return;
+        simpleTimeDiagnostic('project automation started');
 
         if (isSelectedSimpleTimeProject(targetProject)) {
+            simpleTimeDiagnostic('target project already selected');
             removeSimpleTimeCustomerParameter();
-            showSimpleTimeAutomationStatus(`${targetProject} ist bereits ausgewählt.`);
             return;
         }
 
@@ -813,6 +926,7 @@ if (typeof GM_registerMenuCommand === 'function') {
             input = await pollUntil(getSimpleTimeProjectInput, { intervalMs: 200, timeoutMs: 5000 });
         }
         if (!input) {
+            simpleTimeDiagnostic('project search field not found');
             showSimpleTimeAutomationStatus('SimpleTime: Das Projekt-Suchfeld wurde nicht gefunden. Bitte Projekt manuell wählen.', true);
             removeSimpleTimeCustomerParameter();
             return;
@@ -826,6 +940,7 @@ if (typeof GM_registerMenuCommand === 'function') {
         }, { intervalMs: 200, timeoutMs: 8000 });
 
         if (!rows || !rows.selector) {
+            simpleTimeDiagnostic('target project not found or ambiguous');
             showSimpleTimeAutomationStatus(
                 `SimpleTime: ${targetProject} wurde für „${customerShortCode}“ nicht eindeutig gefunden. Bitte manuell auswählen.`,
                 true
@@ -840,15 +955,59 @@ if (typeof GM_registerMenuCommand === 'function') {
             { intervalMs: 200, timeoutMs: 5000 }
         );
 
-        if (selected) {
-            showSimpleTimeAutomationStatus(`${targetProject} wurde ausgewählt.`);
-        } else {
+        simpleTimeDiagnostic(selected ? 'project selection confirmed' : 'project selection not confirmed');
+        if (!selected) {
             showSimpleTimeAutomationStatus(
                 `SimpleTime: Der Klick auf ${targetProject} wurde gesendet, aber die Auswahl ließ sich im Seitenzustand nicht bestätigen. Bitte prüfen.`,
                 true
             );
         }
         removeSimpleTimeCustomerParameter();
+    }
+
+    async function initializeSimpleTimeHubspotInformation(hubspotId) {
+        const id = String(hubspotId || '').trim();
+        if (!/^\d+$/.test(id)) return false;
+        simpleTimeDiagnostic('HubSpot information autofill started');
+
+        const field = await pollUntil(getSimpleTimeInformationField, { intervalMs: 250, timeoutMs: 20000 });
+        if (!field) {
+            simpleTimeDiagnostic('Information textarea not found');
+            showSimpleTimeAutomationStatus(
+                'SimpleTime: Das Feld „Information“ wurde nicht gefunden. Die HubSpot-ID konnte nicht eingetragen werden.',
+                true
+            );
+            return false;
+        }
+
+        const filled = setSimpleTimeInformation(field, id);
+        if (!filled) {
+            simpleTimeDiagnostic('Information textarea rejected HubSpot ID');
+            showSimpleTimeAutomationStatus(
+                'SimpleTime: Die HubSpot-ID konnte nicht in das Feld „Information“ eingetragen werden.',
+                true
+            );
+            return false;
+        }
+
+        simpleTimeDiagnostic('HubSpot information autofill completed');
+        removeSimpleTimeHubspotIdParameter();
+        return true;
+    }
+
+    async function initializeSimpleTimeAutomation() {
+        const currentUrl = new URL(window.location.href);
+        const customerShortCode = String(currentUrl.searchParams.get(SIMPLETIME_CUSTOMER_PARAM) || '').trim();
+        const hubspotId = String(currentUrl.searchParams.get(SIMPLETIME_HUBSPOT_ID_PARAM) || '').trim();
+        const targetProject = getSimpleTimeTargetProject(customerShortCode);
+        if (!customerShortCode && !hubspotId) return;
+
+        if (customerShortCode && targetProject) {
+            await initializeSimpleTimeProjectSelection(customerShortCode, targetProject);
+        }
+        if (hubspotId) {
+            await initializeSimpleTimeHubspotInformation(hubspotId);
+        }
     }
 
     if (window.location.hostname === 'teambox.everii.io' &&
@@ -1498,6 +1657,73 @@ if (typeof GM_registerMenuCommand === 'function') {
                 background: #000000 !important;
             }
 
+            /* SimpleTime is shown in an in-page dropdown, not a popup window. */
+            .dea-simpletime-panel,
+            .dea-simpletime-panel * {
+                box-sizing: border-box !important;
+            }
+            .dea-simpletime-panel {
+                display: none !important;
+                position: fixed !important;
+                z-index: 2147483647 !important;
+                flex-direction: column !important;
+                min-width: 240px !important;
+                min-height: 220px !important;
+                overflow: hidden !important;
+                color: #ffffff !important;
+                background: ${BAR_BACKGROUND} !important;
+                border: 1px solid ${BAR_HOVER_BACKGROUND} !important;
+                border-radius: 4px !important;
+                box-shadow: 0 6px 24px rgba(0, 0, 0, 0.4) !important;
+                font: 13px/1.2 Arial, Helvetica, sans-serif !important;
+            }
+            .dea-simpletime-panel.is-open {
+                display: flex !important;
+            }
+            .dea-simpletime-panel-header {
+                display: flex !important;
+                flex: 0 0 36px !important;
+                align-items: center !important;
+                justify-content: space-between !important;
+                gap: 10px !important;
+                padding: 0 8px 0 12px !important;
+                color: #ffffff !important;
+                background: ${BAR_BACKGROUND} !important;
+                border-bottom: 1px solid ${BAR_HOVER_BACKGROUND} !important;
+            }
+            .dea-simpletime-panel-title {
+                display: inline-flex !important;
+                flex: 0 0 auto !important;
+                align-items: center !important;
+                overflow: hidden !important;
+                margin-left: -8px !important;
+                padding: 6px 8px !important;
+                color: #ffffff !important;
+                background: transparent !important;
+                border-radius: 3px !important;
+                font: 600 13px/1 Arial, Helvetica, sans-serif !important;
+                white-space: nowrap !important;
+                text-overflow: ellipsis !important;
+                text-decoration: none !important;
+                cursor: pointer !important;
+                transition: background-color 120ms ease, text-decoration-color 120ms ease !important;
+            }
+            .dea-simpletime-panel-title:hover {
+                background: ${BAR_HOVER_BACKGROUND} !important;
+                text-decoration: underline !important;
+            }
+            .dea-simpletime-panel-title:focus-visible {
+                outline: 2px solid #ffffff !important;
+                outline-offset: 1px !important;
+            }
+            .dea-simpletime-frame {
+                display: block !important;
+                flex: 1 1 auto !important;
+                width: 100% !important;
+                min-height: 0 !important;
+                border: 0 !important;
+                background: #ffffff !important;
+            }
 
             /* One shared tile hover for DEA and legacy icons. */
             #${BAR_ID} .dea-links a:hover,
@@ -3131,23 +3357,76 @@ if (typeof GM_registerMenuCommand === 'function') {
         return dropdown;
     }
 
+    function getOpenSimpleTimeWrapper() {
+        return document.querySelector(`#${BAR_ID} .dea-simpletime-action-wrap.is-open`);
+    }
+
+    function getOpenSimpleTimePanel() {
+        return document.querySelector('.dea-simpletime-panel.is-open');
+    }
+
+    function closeSimpleTimePanel(reason) {
+        const panel = getOpenSimpleTimePanel();
+        if (!panel) return;
+        const wrapper = getOpenSimpleTimeWrapper();
+        simpleTimeDiagnostic('panel closed', { reason, stack: new Error().stack });
+        panel.classList.remove('is-open');
+        panel.setAttribute('aria-hidden', 'true');
+        if (wrapper) wrapper.classList.remove('is-open');
+        safeStorage.remove(sessionStorage, SIMPLETIME_OPEN_STORAGE_KEY);
+    }
+
     function closeCloneDropdowns(except = null) {
         document.querySelectorAll(`#${BAR_ID} .dea-clone-state-wrap.is-open`).forEach(wrapper => {
-            if (wrapper === except) return;
+            // The SimpleTime panel has its own outside-click close policy.
+            if (wrapper === except || wrapper.classList.contains('dea-simpletime-action-wrap')) return;
             wrapper.classList.remove('is-open');
             const dropdown = wrapper.querySelector('.dea-clone-state-dropdown');
             if (dropdown) dropdown.setAttribute('aria-hidden', 'true');
         });
     }
 
-    // Dropdowns schließen, sobald außerhalb des Menüs geklickt wird (oder Escape).
-    // Rechtsklick auf das T selbst bleibt dem Toggle-Handler überlassen.
+    // Keep the currently open window visible while the toolbar is rebuilt.
+    function removeSimpleTimePanelsForBarRefresh() {
+        const openWrapper = getOpenSimpleTimeWrapper();
+        const openPanel = getOpenSimpleTimePanel();
+        if (openWrapper || openPanel) {
+            safeStorage.set(sessionStorage, SIMPLETIME_OPEN_STORAGE_KEY, 'true');
+            simpleTimeDiagnostic('toolbar refresh; preserving open panel');
+        }
+        document.querySelectorAll('.dea-simpletime-panel').forEach(panel => {
+            if (panel !== openPanel) panel.remove();
+        });
+    }
+
+    // SimpleTime schließt ausschließlich durch einen Klick außerhalb des Fensters.
     (function installCloneDropdownOutsideClose() {
         if (window.__deaDropdownOutsideClose) return;
         window.__deaDropdownOutsideClose = true;
         const onPointerDown = event => {
-            if (!document.querySelector(`#${BAR_ID} .dea-clone-state-wrap.is-open`)) return;
             const target = event.target instanceof Element ? event.target : null;
+            const simpleTimePanel = getOpenSimpleTimePanel();
+            if (simpleTimePanel) {
+                if (target && target.closest('.dea-simpletime-panel')) return;
+                const simpleTimeWrapper = getOpenSimpleTimeWrapper();
+                if (simpleTimeWrapper && target && target.closest('.dea-simpletime-action-wrap') === simpleTimeWrapper) return;
+                simpleTimeDiagnostic('outside pointerdown', {
+                    targetTag: target && target.tagName,
+                    targetClass: target && String(target.className || '').slice(0, 120)
+                });
+                closeSimpleTimePanel('outside pointerdown');
+                closeCloneDropdowns();
+                return;
+            }
+            if (!document.querySelector(`#${BAR_ID} .dea-clone-state-wrap.is-open`)) {
+                // A click during a re-render counts as the outside click too.
+                if (safeStorage.get(sessionStorage, SIMPLETIME_OPEN_STORAGE_KEY) === 'true') {
+                    safeStorage.remove(sessionStorage, SIMPLETIME_OPEN_STORAGE_KEY);
+                }
+                return;
+            }
+            if (target && target.closest('.dea-simpletime-panel')) return;
+            if (target && target.closest('.dea-simpletime-action-wrap')) return;
             if (target && target.closest('.dea-clone-state-dropdown')) return;
             if (target && event.button === 2 && target.closest('.dea-clone-state-wrap')) return;
             closeCloneDropdowns();
@@ -3156,13 +3435,35 @@ if (typeof GM_registerMenuCommand === 'function') {
         window.addEventListener('mousedown', onPointerDown, true);
         window.addEventListener('contextmenu', event => {
             const target = event.target instanceof Element ? event.target : null;
+            const simpleTimePanel = getOpenSimpleTimePanel();
+            if (simpleTimePanel) {
+                if (target && target.closest('.dea-simpletime-panel')) return;
+                const simpleTimeWrapper = getOpenSimpleTimeWrapper();
+                if (simpleTimeWrapper && target && target.closest('.dea-simpletime-action-wrap') === simpleTimeWrapper) return;
+                simpleTimeDiagnostic('outside contextmenu');
+                closeSimpleTimePanel('outside context menu');
+                closeCloneDropdowns();
+                return;
+            }
             if (target && target.closest('.dea-clone-state-wrap')) return;
             closeCloneDropdowns();
         }, true);
         window.addEventListener('keydown', event => {
-            if (event.key === 'Escape') closeCloneDropdowns();
+            if (event.key !== 'Escape') return;
+            // Escape does not dismiss SimpleTime; it remains until an outside click.
+            if (getOpenSimpleTimePanel()) return;
+            closeCloneDropdowns();
         }, true);
-        window.addEventListener('blur', () => closeCloneDropdowns());
+        window.addEventListener('blur', () => {
+            // Moving focus into or reloading the embedded iframe must not dismiss it.
+            const simpleTimePanel = getOpenSimpleTimePanel();
+            simpleTimeDiagnostic('host window blur', { panelOpen: Boolean(simpleTimePanel) });
+            if (simpleTimePanel) {
+                closeCloneDropdowns(getOpenSimpleTimeWrapper());
+            } else {
+                closeCloneDropdowns();
+            }
+        });
     })();
 
     function rememberRevision(data, ticketId) {
@@ -3289,6 +3590,7 @@ if (typeof GM_registerMenuCommand === 'function') {
     }
 
     function clearBar() {
+        removeSimpleTimePanelsForBarRefresh();
         const bar = document.getElementById(BAR_ID);
         if (bar) bar.remove();
     }
@@ -3490,7 +3792,8 @@ if (typeof GM_registerMenuCommand === 'function') {
         cloneIndex = null,
         teambox = null,
         popupName = null,
-        popupFeatures = null
+        popupFeatures = null,
+        onClick = null
     }) {
         const link = document.createElement('a');
         if (serviceIcon) link.dataset.serviceIcon = serviceIcon;
@@ -3527,6 +3830,15 @@ if (typeof GM_registerMenuCommand === 'function') {
                 if (typeof event.stopImmediatePropagation === 'function') {
                     event.stopImmediatePropagation();
                 }
+                return;
+            }
+            if (typeof onClick === 'function') {
+                event.preventDefault();
+                event.stopPropagation();
+                if (typeof event.stopImmediatePropagation === 'function') {
+                    event.stopImmediatePropagation();
+                }
+                onClick(event, link);
                 return;
             }
             event.preventDefault();
@@ -3566,6 +3878,119 @@ if (typeof GM_registerMenuCommand === 'function') {
 
     function addIconLink(parent, options) {
         return addNativeIconLink(parent, { ...options, className: 'dea-link' });
+    }
+
+    function addSimpleTimeDropdownLink(parent, { href, icon, title }) {
+        if (!parent || !document.body) return null;
+        const targetUrl = normalizeUrl(href);
+        const wrapper = document.createElement('span');
+        wrapper.className = 'dea-clone-state-wrap dea-simpletime-action-wrap';
+
+        const panel = document.createElement('div');
+        panel.className = 'dea-simpletime-panel';
+        panel.setAttribute('role', 'dialog');
+        panel.setAttribute('aria-label', 'SimpleTime');
+        panel.setAttribute('aria-hidden', 'true');
+
+        const header = document.createElement('div');
+        header.className = 'dea-simpletime-panel-header';
+        const openTab = document.createElement('a');
+        openTab.className = 'dea-simpletime-panel-title';
+        openTab.href = targetUrl;
+        openTab.target = '_blank';
+        openTab.rel = 'noopener noreferrer';
+        openTab.title = 'SimpleTime in neuem Tab öffnen';
+        openTab.textContent = 'Neuer Tab';
+        header.append(openTab);
+
+        const frame = document.createElement('iframe');
+        frame.className = 'dea-simpletime-frame';
+        frame.title = 'SimpleTime';
+        // Eagerly load SimpleTime as soon as the toolbar is created. This lets
+        // its own userscript populate/select TEAMBOX.<KÜRZEL> before the user
+        // opens the dropdown, instead of starting navigation on the first click.
+        frame.loading = 'eager';
+        frame.referrerPolicy = 'strict-origin-when-cross-origin';
+        frame.dataset.deaLoadState = 'loading';
+        frame.addEventListener('load', () => {
+            frame.dataset.deaLoadState = 'loaded';
+            simpleTimeDiagnostic('iframe loaded', { panelOpen: panel.classList.contains('is-open') });
+        });
+        frame.addEventListener('error', () => {
+            frame.dataset.deaLoadState = 'error';
+            simpleTimeDiagnostic('iframe load error');
+        });
+        panel.append(header, frame);
+        document.body.appendChild(panel);
+        wrapper.__deaSimpleTimePanel = panel;
+
+        let link = null;
+        const positionPanel = () => {
+            const rect = link.getBoundingClientRect();
+            const margin = 12;
+            const width = Math.max(240, Math.min(960, window.innerWidth - margin * 2));
+            const height = Math.max(220, Math.min(680, window.innerHeight - margin * 2));
+            const left = Math.max(margin, Math.min(rect.left, window.innerWidth - width - margin));
+            let top = rect.bottom + 6;
+            if (top + height > window.innerHeight - margin) {
+                top = Math.max(margin, rect.top - height - 6);
+            }
+            panel.style.left = `${left}px`;
+            panel.style.top = `${top}px`;
+            panel.style.width = `${width}px`;
+            panel.style.height = `${height}px`;
+        };
+
+        const setOpen = open => {
+            simpleTimeDiagnostic(open ? 'panel opened' : 'panel closed', { source: 'icon or restore' });
+            wrapper.classList.toggle('is-open', open);
+            panel.classList.toggle('is-open', open);
+            panel.setAttribute('aria-hidden', String(!open));
+            if (open) {
+                safeStorage.set(sessionStorage, SIMPLETIME_OPEN_STORAGE_KEY, 'true');
+                const positionWhenReady = () => {
+                    if (wrapper.classList.contains('is-open') && link.isConnected) positionPanel();
+                };
+                if (link.isConnected) positionPanel();
+                else window.requestAnimationFrame(positionWhenReady);
+            } else {
+                safeStorage.remove(sessionStorage, SIMPLETIME_OPEN_STORAGE_KEY);
+            }
+        };
+
+        link = addNativeIconLink(wrapper, {
+            href: targetUrl,
+            icon,
+            title,
+            serviceIcon: 'simpletime',
+            onClick: () => {
+                closeCloneDropdowns(wrapper);
+                setOpen(!wrapper.classList.contains('is-open'));
+            }
+        });
+        link.addEventListener('contextmenu', event => {
+            event.preventDefault();
+            event.stopPropagation();
+            if (typeof event.stopImmediatePropagation === 'function') event.stopImmediatePropagation();
+            closeSimpleTimePanel('right-click on SimpleTime icon');
+            closeCloneDropdowns();
+            window.open(targetUrl, '_blank', 'noopener,noreferrer');
+        }, true);
+        parent.appendChild(wrapper);
+        // Restore an open panel after the bar or HubSpot page rerenders.
+        if (safeStorage.get(sessionStorage, SIMPLETIME_OPEN_STORAGE_KEY) === 'true') {
+            simpleTimeDiagnostic('restoring open panel after render');
+            // Swap an older iframe for the current ticket's URL without closing
+            // the visible panel during a toolbar refresh.
+            document.querySelectorAll('.dea-simpletime-panel').forEach(existingPanel => {
+                if (existingPanel !== panel) existingPanel.remove();
+            });
+            setOpen(true);
+        }
+        // Start the embedded app in the background immediately, after the
+        // frame is attached to the document. The click only reveals it.
+        frame.src = targetUrl;
+        return link;
     }
 
     function addExternalAppLink(parent, { href, icon, title }) {
@@ -3752,6 +4177,7 @@ if (typeof GM_registerMenuCommand === 'function') {
     function renderLoading() {
         const bar = createBar();
         bar.classList.add('is-loading');
+        removeSimpleTimePanelsForBarRefresh();
         bar.replaceChildren();
         const label = document.createElement('span');
         label.className = 'dea-context';
@@ -3797,6 +4223,7 @@ if (typeof GM_registerMenuCommand === 'function') {
         const authRequired = Boolean(error && error.customerboxAuthRequired);
         const bar = createBar();
         bar.classList.remove('is-loading');
+        removeSimpleTimePanelsForBarRefresh();
         bar.replaceChildren();
 
         const cluster = document.createElement('span');
@@ -3880,6 +4307,7 @@ if (typeof GM_registerMenuCommand === 'function') {
 
         const bar = createBar();
         bar.classList.add('is-loading');
+        removeSimpleTimePanelsForBarRefresh();
         bar.replaceChildren();
 
         const cluster = document.createElement('span');
@@ -4027,6 +4455,7 @@ if (typeof GM_registerMenuCommand === 'function') {
     function renderCustomerboxLoading() {
         const bar = createBar();
         bar.classList.add('is-loading');
+        removeSimpleTimePanelsForBarRefresh();
         bar.replaceChildren();
 
         // Keep the context already known from DEA while the legacy record is
@@ -4156,6 +4585,7 @@ if (typeof GM_registerMenuCommand === 'function') {
         const deploymentToolUnavailableError = isDeploymentToolUnavailableError(error);
         const bar = createBar();
         bar.classList.remove('is-loading');
+        removeSimpleTimePanelsForBarRefresh();
         bar.replaceChildren();
         bar.dataset.syncErrorAction = syncError ? 'true' : 'false';
         bar.dataset.deploymentToolSignInAction = deploymentToolSignInError ? 'true' : 'false';
@@ -4602,13 +5032,10 @@ if (typeof GM_registerMenuCommand === 'function') {
             addGithubModulesMenu(links, githubLink);
         }
 
-        addModeIconLink(links, {
-            href: getSimpleTimeUrl(customer),
+        addSimpleTimeDropdownLink(links, {
+            href: getSimpleTimeUrl(customer, ticketId),
             icon: IS_STEVEN ? ICONS.simpletimeSteven : ICONS.simpletimeStopwatch,
-            title: 'SimpleTime öffnen',
-            serviceIcon: 'simpletime',
-            popupName: 'dea-simpletime-popup',
-            popupFeatures: 'popup=yes,width=860,height=380,resizable=yes,scrollbars=yes'
+            title: 'SimpleTime öffnen'
         });
 
         cluster.appendChild(links);
@@ -5160,6 +5587,7 @@ if (typeof GM_registerMenuCommand === 'function') {
         state.ticketId = ticketId || state.ticketId;
         const bar = createBar();
         bar.classList.remove('is-loading');
+        removeSimpleTimePanelsForBarRefresh();
         bar.replaceChildren();
         renderTeambox(bar, data, teambox);
     }
@@ -5211,6 +5639,7 @@ if (typeof GM_registerMenuCommand === 'function') {
 
         const bar = createBar();
         bar.classList.remove('is-loading');
+        removeSimpleTimePanelsForBarRefresh();
         bar.replaceChildren();
         const teamboxes = Array.isArray(data && data.teamboxes) ? data.teamboxes : [];
         if (teamboxes.length === 0) {
