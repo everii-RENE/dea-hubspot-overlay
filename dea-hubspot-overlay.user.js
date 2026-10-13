@@ -1,6 +1,6 @@
 // ==UserScript==
 // @name         [DEA] HubSpot Overlay Customizer
-// @version      6.4.31
+// @version      6.4.33
 // @updateURL    https://raw.githubusercontent.com/everii-RENE/dea-hubspot-overlay/master/dea-hubspot-overlay.user.js
 // @downloadURL  https://raw.githubusercontent.com/everii-RENE/dea-hubspot-overlay/master/dea-hubspot-overlay.user.js
 // @description  Stable release: compact DEA / clone / terminal / YouTrack / GitHub bar for HubSpot
@@ -137,9 +137,13 @@ if (typeof GM_registerMenuCommand === 'function') {
     }
 
     function getSimpleTimeTargetProject(customerShortCode) {
-        const shortCode = String(customerShortCode || '').trim().replace(/-/g, '_');
-        if (!shortCode) return '';
-        return /^TEAMBOX\./i.test(shortCode) ? shortCode : `TEAMBOX.${shortCode}`;
+        const suppliedCode = String(customerShortCode || '').trim();
+        if (!suppliedCode) return '';
+        // Test teamboxes use the production customer's SimpleTime project.
+        // Strip only a trailing -test marker before converting separators.
+        const withoutPrefix = suppliedCode.replace(/^TEAMBOX\./i, '');
+        const realShortCode = withoutPrefix.replace(/-test$/i, '').replace(/-/g, '_');
+        return realShortCode ? `TEAMBOX.${realShortCode}` : '';
     }
 
     // Temporäres Timing-Log für die Performance-Analyse des Ticket-Ladevorgangs.
@@ -2651,23 +2655,39 @@ if (typeof GM_registerMenuCommand === 'function') {
         }
     }
 
-    function parseTeamboxDomainUrl(html, detailUrl) {
+    function parseTeamboxDomainUrl(html, detailUrl, useInternalDomain = false) {
         const parser = new DOMParser();
         const documentFromResponse = parser.parseFromString(String(html || ''), 'text/html');
-        const info = documentFromResponse.querySelector('#teambox-info');
-        if (!info) return null;
-
-        const domainRow = Array.from(info.querySelectorAll('dl.row')).find(row => {
-            const label = row.querySelector('dt');
-            return label && label.textContent.replace(/\s+/g, ' ').trim().toLowerCase() === 'domain:';
+        // The detail page normally wraps these fields in #teambox-info. Search
+        // the whole response as a fallback in case the DEA markup is reshaped.
+        const info = documentFromResponse.querySelector('#teambox-info') || documentFromResponse;
+        const expectedLabel = useInternalDomain ? 'internal domain' : 'domain';
+        const label = Array.from(info.querySelectorAll('dt')).find(element => {
+            const value = element.textContent
+                .replace(/\s+/g, ' ')
+                .trim()
+                .replace(/[:：]$/, '')
+                .toLocaleLowerCase();
+            return value === expectedLabel;
         });
-        if (!domainRow) return null;
+        if (!label) return null;
 
-        const domainLink = domainRow.querySelector('dd a[href]');
-        if (!domainLink) return null;
+        const row = label.closest('dl') || label.parentElement;
+        const valueCell = row && row.querySelector('dd');
+        if (!valueCell) return null;
+
+        const domainLink = valueCell.querySelector('a[href]');
+        const rawValue = String(
+            domainLink ? domainLink.getAttribute('href') : valueCell.textContent
+        ).trim();
+        if (!rawValue) return null;
 
         try {
-            const domainUrl = new URL(domainLink.getAttribute('href'), detailUrl);
+            // DEA generally provides a full href. Accept a plain hostname too,
+            // since some versions render the Internal Domain as text only.
+            const domainUrl = domainLink
+                ? new URL(rawValue, detailUrl)
+                : new URL(/^https?:\/\//i.test(rawValue) ? rawValue : `https://${rawValue}`);
             if (!/^https?:$/i.test(domainUrl.protocol)) return null;
             domainUrl.pathname = '/app/auth';
             domainUrl.search = '';
@@ -2710,11 +2730,13 @@ if (typeof GM_registerMenuCommand === 'function') {
         return request;
     }
 
-    function getTeamboxDomainUrl(teamboxId) {
+    function getTeamboxDomainUrl(teamboxId, useInternalDomain = false) {
         const id = String(teamboxId || '').trim();
         if (!id) return Promise.resolve(null);
         const detailUrl = `${TOOL}/teamboxes/${encodeURIComponent(id)}`;
-        return fetchTeamboxDetailHtml(id).then(html => html ? parseTeamboxDomainUrl(html, detailUrl) : null);
+        return fetchTeamboxDetailHtml(id).then(html =>
+            html ? parseTeamboxDomainUrl(html, detailUrl, useInternalDomain) : null
+        );
     }
 
     // Reads the TablePlus link of the "MariaDB (full access)" box from the
@@ -3632,12 +3654,15 @@ if (typeof GM_registerMenuCommand === 'function') {
         // Create the Teambox icon immediately. Its href is filled in after
         // the detail page has been read, so the icon cannot disappear merely
         // because the cross-origin request is still pending.
+        const usesInternalDomain = /-test$/i.test(getCustomerName(teambox).trim());
+        const domainLabel = usesInternalDomain ? 'Internal Domain' : 'Teambox-Domain';
         const domainLink = addIconLink(dropdown, {
             href: '#',
             icon: ICONS.openClone,
-            title: teamboxId ? 'Teambox-Domain wird geladen' : 'Teambox-Domain nicht verfügbar'
+            title: teamboxId ? `${domainLabel} wird geladen` : `${domainLabel} nicht verfügbar`
         });
         domainLink.dataset.deaDomainLink = 'true';
+        domainLink.dataset.deaDomainType = usesInternalDomain ? 'internal' : 'public';
         domainLink.dataset.deaDomainLoading = teamboxId ? 'true' : 'false';
         domainLink.classList.add('is-disabled');
 
@@ -3700,17 +3725,21 @@ if (typeof GM_registerMenuCommand === 'function') {
         }
 
         if (teamboxId) {
-            getTeamboxDomainUrl(teamboxId).then(domainUrl => {
+            getTeamboxDomainUrl(teamboxId, usesInternalDomain).then(domainUrl => {
                 if (!domainLink.isConnected) return;
                 if (domainUrl) {
                     domainLink.href = domainUrl;
-                    domainLink.title = 'Teambox-Domain öffnen';
-                    domainLink.setAttribute('aria-label', 'Teambox-Domain öffnen');
+                    const openTitle = usesInternalDomain ? 'Internal Domain öffnen' : 'Teambox-Domain öffnen';
+                    domainLink.title = openTitle;
+                    domainLink.setAttribute('aria-label', openTitle);
                     domainLink.dataset.deaDomainLoading = 'false';
                     domainLink.classList.remove('is-disabled');
                 } else {
-                    domainLink.title = 'Teambox-Domain nicht verfügbar';
-                    domainLink.setAttribute('aria-label', 'Teambox-Domain nicht verfügbar');
+                    const unavailableTitle = usesInternalDomain
+                        ? 'Internal Domain nicht verfügbar'
+                        : 'Teambox-Domain nicht verfügbar';
+                    domainLink.title = unavailableTitle;
+                    domainLink.setAttribute('aria-label', unavailableTitle);
                     domainLink.dataset.deaDomainLoading = 'false';
                 }
             });
