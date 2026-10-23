@@ -1,6 +1,6 @@
 # [DEA] HubSpot Overlay Customizer
 
-Ein Userscript (Violentmonkey / Tampermonkey), das in HubSpot-Tickets eine kompakte, verschiebbare Leiste einblendet. Sie bündelt alle wichtigen Teambox-Aktionen auf einen Blick: **DEA**, **Clones**, **Terminal**, **TablePlus**, **Custom Deployment**, **YouTrack** und **GitHub** – inklusive automatischer Erkennung des **Old Stack** (Customerbox).
+Ein Userscript (Violentmonkey / Tampermonkey), das in HubSpot-Tickets eine kompakte, verschiebbare Leiste einblendet. Sie bündelt alle wichtigen Teambox-Aktionen auf einen Blick: **DEA**, **Clones**, **Terminal**, **TablePlus**, **Custom Deployment**, **YouTrack** und **GitHub**
 
 Zusätzlich automatisiert das Script wiederkehrende Klickfolgen im Teambox Deployment Tool (Teambox löschen, Custom Deployment starten, HubSpot-Sync auslösen) und passt zwei Elemente der HubSpot-Oberfläche an.
 
@@ -21,12 +21,11 @@ Zusätzlich automatisiert das Script wiederkehrende Klickfolgen im Teambox Deplo
   - [1. Ticket-Erkennung und DEA-Ansicht](#1-ticket-erkennung-und-dea-ansicht)
   - [2. Clone-Verwaltung](#2-clone-verwaltung)
   - [3. DEA-Icon-Menü](#3-dea-icon-menü)
-  - [4. Old-Stack-Ansicht (Customerbox)](#4-old-stack-ansicht-customerbox)
-  - [5. Ticketbesitz-Schloss und HubSpot-Sync](#5-ticketbesitz-schloss-und-hubspot-sync)
-  - [6. Fehleranzeigen](#6-fehleranzeigen)
-  - [7. Automatisierungen im Deployment Tool](#7-automatisierungen-im-deployment-tool)
-  - [8. Anpassungen der HubSpot-Oberfläche](#8-anpassungen-der-hubspot-oberfläche)
-  - [9. Bedienung der Leiste](#9-bedienung-der-leiste)
+  - [4. Ticketbesitz-Schloss und HubSpot-Sync](#5-ticketbesitz-schloss-und-hubspot-sync)
+  - [5. Fehleranzeigen](#6-fehleranzeigen)
+  - [6. Automatisierungen im Deployment Tool](#7-automatisierungen-im-deployment-tool)
+  - [7. Anpassungen der HubSpot-Oberfläche](#8-anpassungen-der-hubspot-oberfläche)
+  - [8. Bedienung der Leiste](#9-bedienung-der-leiste)
 - [Einstellungen](#einstellungen)
 - [Gespeicherte Daten](#gespeicherte-daten)
 - [Angesprochene Systeme](#angesprochene-systeme)
@@ -52,9 +51,7 @@ Updates werden über `@updateURL` / `@downloadURL` automatisch vom `master`-Bran
 
 - Zugriff auf die internen Systeme (Netzwerk bzw. VPN):
   - Teambox Deployment Tool (`production.teambox-deployment-tool.service.de1.everii`)
-  - Customerbox (`customerbox.intevo`) – nur für Old-Stack-Tickets
 - Angemeldet im **Teambox Deployment Tool** (sonst erscheint ein entsprechender Hinweis in der Leiste).
-- Für Old-Stack-Tickets: eine aktive Session in **[C] Customerbox**.
 - Für das TablePlus-Icon: ein registrierter `tableplus://`-Protokollhandler im Betriebssystem.
 
 ### Benötigte Rechte (`@grant`)
@@ -147,33 +144,8 @@ Rechtsklick auf das DEA-Logo öffnet ein Menü mit:
 
 - **Teambox-Domain** – öffnet `/app/auth` der Teambox-Domain (Domain wird von der Detailseite der Teambox gelesen)
 - **Upgrade / Custom Deployment**
-- **[C] Old-Stack-Leiste laden** – schaltet das aktuelle Ticket manuell auf die Old-Stack-Ansicht um
 
-### 4. Old-Stack-Ansicht (Customerbox)
-
-Tickets von Kunden, die noch auf dem alten Stack laufen, werden automatisch mit der Customerbox-Daten­quelle dargestellt.
-
-**Wann wird der Old Stack verwendet?**
-1. Die DEA-API kennzeichnet eine Teambox mit dem Badge **„Old stack“**, oder
-2. **alle** Teamboxen des Tickets haben auf ihrer Detailseite den Status **Stopped** (Kunden, die bereits auf der neuen Infrastruktur angelegt sind, aber real noch auf dem Old Stack laufen), oder
-3. du schaltest manuell um – über das DEA-Icon im Fehlerfall oder das DEA-Icon-Menü.
-
-**Was wird angezeigt?**
-- Kopfzeile: `<token>: <release>`
-- Zweite Zeile: `(<Servicetyp>:<Server>) <Account-Manager>:<Land>` (Servicetypen: SaaS, OnP, Premium)
-- Icons: Live-Teambox, Supportbox (bzw. „Create Clone im alten Stack“, falls noch keine existiert), Featurebox, YouTrack (mit vorausgefülltem Bug-Template inkl. Ticket-ID, Release und Kunde) und GitHub.
-- Das Customerbox-Logo ist mit der Teambox in der Customerbox verlinkt.
-
-**Parallele Abfrage:** Die Customerbox wird schon beim Öffnen des Tickets parallel zur DEA-Abfrage angefragt. Antwortet sie zuerst, wird sofort angezeigt; die DEA-Antwort bleibt aber für die endgültige Modus-Entscheidung maßgeblich.
-
-**Session-Handling**
-- Erfolgreiche Antworten werden 20 Sekunden im Tab zwischengespeichert.
-- Mehrere HubSpot-Tabs reihen ihre Customerbox-Anfragen **tabübergreifend** hintereinander ein (Web Locks API, mit `localStorage`-Lock als Fallback), damit sich nicht zehn Tabs gleichzeitig an derselben Session anmelden.
-- Bei „abgelaufener Session“ wird bis zu fünfmal mit steigender Wartezeit und Zufallsversatz wiederholt.
-- Bei HTTP 401 oder dem Text „Anmeldung in [C] erforderlich“ wird sofort **ohne** Wiederholungen der Hinweis **„Anmeldung in [C] erforderlich“** angezeigt. Ein Klick öffnet die Customerbox in einem neuen Tab (der Tab bleibt für die Anmeldung offen) und lädt danach die Leiste neu.
-- Nach 120 Sekunden ohne Ergebnis (und ohne laufende Anfrage) erscheint „Abgelaufene Session. Bitte [C] öffnen um Session zu aktualisieren.“ – der Klick öffnet die Customerbox kurz und schließt den Tab wieder.
-
-### 5. Ticketbesitz-Schloss und HubSpot-Sync
+### 4. Ticketbesitz-Schloss und HubSpot-Sync
 
 Meldet die DEA-API, dass das Ticket **nicht zu dir gehört** („This ticket is not an open ticket of yours“), erscheint neben dem Kundennamen ein **rotes Schloss**. Ohne eindeutiges Signal der API wird *kein* Schloss angezeigt.
 
@@ -185,20 +157,19 @@ Meldet die DEA-API, dass das Ticket **nicht zu dir gehört** („This ticket is 
 
 Ist der Sync-Button nicht verfügbar (läuft evtl. schon), wird das im Tooltip des Schlosses angezeigt.
 
-### 6. Fehleranzeigen
+### 5. Fehleranzeigen
 
 Fehler erscheinen direkt in der Leiste. Das DEA-Icon wird in bestimmten Fällen zur Aktion:
 
 | Fehler | Aktion beim Klick auf das DEA-Icon |
 |---|---|
-| „This ticket has not been synced from HubSpot yet“ | Lädt die Old-Stack-Ansicht |
 | „Sign in to the Teambox Deployment Tool first“ | Öffnet das Deployment Tool |
 | „DEA-Tool nicht erreichbar“ | Öffnet das Deployment Tool |
 | „Ticket is not an open ticket of yours“ | Zusätzlicher **↻-Button** lädt die Leiste neu |
 
 Die Sync-Meldung wird zusätzlich im sichtbaren Seitentext erkannt, falls sie vom separaten HubSpot-Overlay direkt gerendert wird.
 
-### 7. Automatisierungen im Deployment Tool
+### 6. Automatisierungen im Deployment Tool
 
 Auf den Seiten des Teambox Deployment Tools übernimmt das Script folgende Schritte:
 
@@ -219,12 +190,12 @@ Auf den Seiten des Teambox Deployment Tools übernimmt das Script folgende Schri
 **Ticketübersicht** (`/tickets#dea-auto-sync`)
 - Wird nur für den Sync-Fallback genutzt: klickt „Sync now“ und schließt den Tab.
 
-### 8. Anpassungen der HubSpot-Oberfläche
+### 7. Anpassungen der HubSpot-Oberfläche
 
 - **Globale Suche:** Das Suchfeld „Find in HubSpot“ wird auf die **halbe Breite** (mindestens 160 px) verkleinert. Bis die Breite gesetzt ist, bleibt das Feld unsichtbar, damit es nicht springt.
 - **Breeze-Assistent:** In der globalen Toolbar wird nur noch das **Icon** angezeigt; der Text ist als Tooltip/ARIA-Label weiterhin vorhanden.
 
-### 9. Bedienung der Leiste
+### 8. Bedienung der Leiste
 
 | Aktion | Wirkung |
 |---|---|
@@ -268,26 +239,6 @@ Für die Fehlersuche kann im Code die Konstante `DEBUG` auf `true` gesetzt werde
 | `sessionStorage` | `dea_custom_deployment_pending` / `dea_custom_deployment_baseline_ops` | Zwischenstand für die Weiterleitung nach Custom Deployment |
 
 Sämtliche Speicherzugriffe sind fehlertolerant: Ist ein Speicher nicht verfügbar, arbeitet das Script mit Standardwerten weiter.
-
----
-
-## Angesprochene Systeme
-
-**Teambox Deployment Tool (DEA)** – `https://production.teambox-deployment-tool.service.de1.everii`
-
-| Aufruf | Zweck |
-|---|---|
-| `GET /api/overlays/hubspot/ticket` | Teamboxen, Clones, Agent, Release, Besitz, Konfiguration für YouTrack |
-| `GET /api/overlays/hubspot/youtrack` | Verknüpfte YouTrack-Issues |
-| `POST /api/overlays/hubspot/clone` | Neuen Clone anlegen |
-| `GET /teamboxes/<id>` | Status, Domain und Operationen einer Teambox |
-| `GET /tickets` + `PUT /hubspot/sync` | HubSpot-Sync auslösen |
-
-Alle API-Aufrufe senden den Header `X-Overlay-Ticket` mit der HubSpot-Ticket-ID (Timeout 90 s).
-
-**Customerbox** – `https://customerbox.intevo/index.php/api/rt_data/<ticket>` für die Old-Stack-Ansicht.
-
-Daraus werden Links zu Live-Teambox, Supportbox, Install/Create Clone, Featurebox und YouTrack abgeleitet.
 
 ---
 
