@@ -1,6 +1,6 @@
 // ==UserScript==
 // @name         [DEA] HubSpot Overlay Customizer
-// @version      6.4.35
+// @version      6.4.42
 // @updateURL    https://raw.githubusercontent.com/everii-RENE/dea-hubspot-overlay/master/dea-hubspot-overlay.user.js
 // @downloadURL  https://raw.githubusercontent.com/everii-RENE/dea-hubspot-overlay/master/dea-hubspot-overlay.user.js
 // @description  Stable release: compact DEA / clone / terminal / YouTrack / GitHub bar for HubSpot
@@ -18,7 +18,6 @@
 // @grant        GM_setValue
 // @grant        GM_registerMenuCommand
 // @connect      production.teambox-deployment-tool.service.de1.everii
-// @connect      customerbox.intevo
 // @run-at       document-idle
 // ==/UserScript==
 
@@ -113,6 +112,21 @@ if (typeof GM_registerMenuCommand === 'function') {
     const SIMPLETIME_CUSTOMER_PARAM = 'dea_teambox';
     const SIMPLETIME_HUBSPOT_ID_PARAM = 'dea_hubspot_id';
     const SIMPLETIME_OPEN_STORAGE_KEY = 'dea_simpletime_dropdown_open';
+    const SIMPLETIME_EDITABLE_SELECTOR = 'input, textarea, select, [contenteditable="true"], [role="textbox"]';
+    let simpleTimeUserInteractedWithControl = false;
+
+    function noteTrustedSimpleTimeInteraction(event) {
+        if (!event.isTrusted) return;
+        const target = event.target instanceof Element ? event.target : null;
+        if (!target) return;
+        if (target.closest(`${SIMPLETIME_EDITABLE_SELECTOR}, .x-form-field-wrap, .x-combo-list-item, .x-boundlist-item, [role="option"]`)) {
+            simpleTimeUserInteractedWithControl = true;
+        }
+    }
+
+    document.addEventListener('pointerdown', noteTrustedSimpleTimeInteraction, true);
+    document.addEventListener('keydown', noteTrustedSimpleTimeInteraction, true);
+    document.addEventListener('beforeinput', noteTrustedSimpleTimeInteraction, true);
 
     function getSimpleTimeUrl(customerShortCode, hubspotId) {
         const target = new URL(SIMPLETIME_BASE_URL);
@@ -740,6 +754,212 @@ if (typeof GM_registerMenuCommand === 'function') {
             .find(isVisibleElement) || null;
     }
 
+    function getStevenLeistungField() {
+        const fields = Array.from(document.querySelectorAll('input.x-form-text, input[type="text"]'))
+            .filter(isVisibleElement)
+            .filter(field => !field.closest('.job-selector-wrap'));
+        const matches = fields.filter(field => {
+            const id = field.id || '';
+            const labels = id
+                ? Array.from(document.querySelectorAll('label[for]'))
+                    .filter(label => label.htmlFor === id)
+                    .map(label => label.innerText || label.textContent || '')
+                : [];
+            const formItemLabel = field.closest('.x-form-item')?.querySelector('.x-form-item-label');
+            const hints = [
+                field.getAttribute('placeholder'),
+                field.getAttribute('aria-label'),
+                field.getAttribute('title'),
+                field.getAttribute('data-qtip'),
+                field.classList.contains('x-form-empty-field') ? field.value : '',
+                formItemLabel && (formItemLabel.innerText || formItemLabel.textContent),
+                ...labels
+            ].map(normalizeSimpleTimeText).filter(Boolean).map(value => value.toLowerCase());
+            return hints.includes('leistung');
+        });
+        return matches.length === 1 ? matches[0] : null;
+    }
+
+    function getStevenTarifeField() {
+        const fields = Array.from(document.querySelectorAll('input.x-form-text, input[type="text"]'))
+            .filter(isVisibleElement)
+            .filter(field => !field.closest('.job-selector-wrap'));
+        const matches = fields.filter(field => {
+            const id = field.id || '';
+            const labels = id
+                ? Array.from(document.querySelectorAll('label[for]'))
+                    .filter(label => label.htmlFor === id)
+                    .map(label => label.innerText || label.textContent || '')
+                : [];
+            const formItemLabel = field.closest('.x-form-item')?.querySelector('.x-form-item-label');
+            const hints = [
+                field.getAttribute('placeholder'),
+                field.getAttribute('aria-label'),
+                field.getAttribute('title'),
+                field.getAttribute('data-qtip'),
+                field.classList.contains('x-form-empty-field') ? field.value : '',
+                formItemLabel && (formItemLabel.innerText || formItemLabel.textContent),
+                ...labels
+            ].map(normalizeSimpleTimeText).filter(Boolean).map(value => value.toLowerCase());
+            return hints.includes('tarife') || hints.includes('tarif');
+        });
+        return matches.length === 1 ? matches[0] : null;
+    }
+
+    function isStevenTarifeResolved(field) {
+        if (!field) return false;
+        const value = normalizeSimpleTimeText(field.value || field.getAttribute('title')).toLowerCase();
+        return Boolean(value && value !== 'tarife' && value !== 'tarif' &&
+            !field.classList.contains('x-form-empty-field'));
+    }
+
+    function getCurrentStevenTarifeField(previousTarifeField, leistungField) {
+        const labeledField = getStevenTarifeField();
+        if (labeledField) return labeledField;
+        if (previousTarifeField && previousTarifeField.isConnected) return previousTarifeField;
+
+        // ExtJS can replace the Tarife input while auto-selecting its only
+        // option. In that short transition, the newly focused combo is the
+        // best available handle, provided it is not the Leistung field.
+        const active = document.activeElement;
+        const currentLeistungField = getStevenLeistungField() || leistungField;
+        if (active instanceof HTMLInputElement && active !== currentLeistungField && isVisibleElement(active)) {
+            return active;
+        }
+        return null;
+    }
+
+    async function waitForStevenTarifeAutoselection(previousTarifeField, leistungField) {
+        let initialField = getCurrentStevenTarifeField(previousTarifeField, leistungField);
+        if (!initialField) {
+            initialField = await pollUntil(
+                () => getCurrentStevenTarifeField(previousTarifeField, leistungField),
+                { intervalMs: 100, timeoutMs: 2500 }
+            );
+        }
+        if (!initialField) return false;
+
+        let lastValue = '';
+        let stableChecks = 0;
+        const resolvedField = await pollUntil(() => {
+            const field = getCurrentStevenTarifeField(previousTarifeField, leistungField) || initialField;
+            if (isStevenTarifeResolved(field)) {
+                const value = normalizeSimpleTimeText(field.value || field.getAttribute('title'));
+                if (value === lastValue) stableChecks += 1;
+                else {
+                    lastValue = value;
+                    stableChecks = 1;
+                }
+                return stableChecks >= 3 ? field : false;
+            }
+            lastValue = '';
+            stableChecks = 0;
+            return false;
+        }, { intervalMs: 100, timeoutMs: 6500 });
+
+        if (resolvedField) {
+            // Let the tariff-triggered ExtJS update finish before moving focus.
+            await new Promise(resolve => window.setTimeout(resolve, 300));
+            simpleTimeDiagnostic('Steven Tarife settled before Information focus', {
+                value: normalizeSimpleTimeText(resolvedField.value || resolvedField.getAttribute('title'))
+            });
+            return true;
+        }
+
+        simpleTimeDiagnostic('Steven Tarife did not auto-resolve before focus timeout');
+        return false;
+    }
+
+    function getSimpleTimeComboOptions(label) {
+        const expected = normalizeSimpleTimeText(label).toLowerCase();
+        return Array.from(document.querySelectorAll(
+            '.x-combo-list-item, .x-boundlist-item, [role="option"]'
+        )).filter(isVisibleElement).filter(option =>
+            normalizeSimpleTimeText(option.innerText || option.textContent).toLowerCase() === expected
+        );
+    }
+
+    function isSimpleTimeComboValueSelected(field, value) {
+        if (!field || field.classList.contains('x-form-empty-field')) return false;
+        const expected = normalizeSimpleTimeText(value).toLowerCase();
+        if (normalizeSimpleTimeText(field.value).toLowerCase() === expected) return true;
+        return (field.readOnly || field.classList.contains('x-trigger-noedit')) &&
+            normalizeSimpleTimeText(field.getAttribute('title')).toLowerCase() === expected;
+    }
+
+    async function selectStevenLeistung(field) {
+        const target = 'Customer Success';
+        if (isSimpleTimeComboValueSelected(field, target)) return true;
+        if (!field) return false;
+
+        field.focus();
+        field.click();
+        let option = await pollUntil(() => {
+            const options = getSimpleTimeComboOptions(target);
+            return options.length ? options[0] : false;
+        }, { intervalMs: 75, timeoutMs: 4000 });
+
+        if (!option) {
+            const wrapper = field.closest('.x-form-field-wrap, .x-form-field-trigger-wrap') || field.parentElement;
+            const trigger = wrapper && wrapper.querySelector(
+                '.x-form-arrow-trigger, .x-form-trigger:not(.x-form-clear-trigger)'
+            );
+            if (trigger) trigger.click();
+            option = await pollUntil(() => {
+                const options = getSimpleTimeComboOptions(target);
+                return options.length ? options[0] : false;
+            }, { intervalMs: 75, timeoutMs: 5000 });
+        }
+
+        if (!option) return isSimpleTimeComboValueSelected(field, target);
+        option.click();
+        return await pollUntil(() => {
+            const currentField = getStevenLeistungField() || field;
+            return isSimpleTimeComboValueSelected(currentField, target);
+        }, { intervalMs: 200, timeoutMs: 5000 });
+    }
+
+    async function initializeStevenLeistungSelection(targetProject) {
+        if (!IS_STEVEN || !targetProject) return true;
+        simpleTimeDiagnostic('Steven Leistung selection waiting for project', { targetProject });
+        const projectReady = await pollUntil(
+            () => isSelectedSimpleTimeProject(targetProject),
+            { intervalMs: 100, timeoutMs: 20000 }
+        );
+        if (!projectReady) {
+            // Project-search automation reports its own failure; avoid a second
+            // delayed message from this parallel watcher.
+            simpleTimeDiagnostic('Steven Leistung selection skipped; project not recognized');
+            return false;
+        }
+
+        const field = await pollUntil(getStevenLeistungField, { intervalMs: 100, timeoutMs: 15000 });
+        if (!field) {
+            simpleTimeDiagnostic('Steven Leistung field not found');
+            showSimpleTimeAutomationStatus(
+                'SimpleTime: Das Feld „Leistung“ wurde nicht gefunden. „Customer Success“ konnte nicht ausgewählt werden.',
+                true
+            );
+            return false;
+        }
+
+        const tariffFieldBeforeSelection = getStevenTarifeField();
+        const selected = await selectStevenLeistung(field);
+        simpleTimeDiagnostic(selected ? 'Steven Leistung Customer Success selected' : 'Steven Leistung selection not confirmed');
+        if (!selected) {
+            showSimpleTimeAutomationStatus(
+                'SimpleTime: „Customer Success“ konnte im Feld „Leistung“ nicht ausgewählt werden.',
+                true
+            );
+            return false;
+        }
+
+        // Selecting the only available tariff can trigger a delayed ExtJS
+        // update that steals focus. Wait for that update to settle first.
+        await waitForStevenTarifeAutoselection(tariffFieldBeforeSelection, field);
+        return true;
+    }
+
     function getSimpleTimeInformationField() {
         const fields = Array.from(document.querySelectorAll('textarea')).filter(isVisibleElement);
         if (!fields.length) return null;
@@ -821,6 +1041,47 @@ if (typeof GM_registerMenuCommand === 'function') {
         field.dispatchEvent(new Event('change', { bubbles: true }));
         field.dispatchEvent(new KeyboardEvent('keyup', { bubbles: true, key: 'e', code: 'KeyE' }));
         return true;
+    }
+
+    function isUserEditingSimpleTimeField(field) {
+        return simpleTimeUserInteractedWithControl && document.activeElement === field;
+    }
+
+    function hasUserFocusedSimpleTimeControl() {
+        if (!simpleTimeUserInteractedWithControl) return false;
+        const active = document.activeElement;
+        return active instanceof Element &&
+            active !== document.body &&
+            (active.matches(SIMPLETIME_EDITABLE_SELECTOR) || Boolean(active.closest('.x-form-field-wrap')));
+    }
+
+    async function focusInformationAfterProjectRecognition(targetProject) {
+        if (!targetProject) return false;
+        const projectReady = await pollUntil(
+            () => isSelectedSimpleTimeProject(targetProject),
+            { intervalMs: 250, timeoutMs: 10000 }
+        );
+        if (!projectReady) return false;
+
+        const field = await pollUntil(getSimpleTimeInformationField, { intervalMs: 250, timeoutMs: 10000 });
+        if (!field) return false;
+
+        // If the user is already working in a SimpleTime field, preserve their
+        // focus and caret. Otherwise place the caret at the end of Information.
+        if (hasUserFocusedSimpleTimeControl()) {
+            simpleTimeDiagnostic('preserving active SimpleTime control; Information focus unchanged');
+            return false;
+        }
+        try {
+            field.focus({ preventScroll: true });
+            const end = String(field.value || '').length;
+            field.setSelectionRange(end, end);
+            simpleTimeDiagnostic('Information focused at end after project recognition');
+            return true;
+        } catch (error) {
+            log('Could not focus SimpleTime Information field', error);
+            return false;
+        }
     }
 
     function setSimpleTimeSearch(input, value) {
@@ -975,6 +1236,11 @@ if (typeof GM_registerMenuCommand === 'function') {
             return false;
         }
 
+        if (isUserEditingSimpleTimeField(field)) {
+            simpleTimeDiagnostic('HubSpot ID autofill skipped because Information is being edited');
+            return false;
+        }
+
         const filled = setSimpleTimeInformation(field, id);
         if (!filled) {
             simpleTimeDiagnostic('Information textarea rejected HubSpot ID');
@@ -997,16 +1263,44 @@ if (typeof GM_registerMenuCommand === 'function') {
         const targetProject = getSimpleTimeTargetProject(customerShortCode);
         if (!customerShortCode && !hubspotId) return;
 
+        // Start watching for the selected project immediately. This lets
+        // Steven's Leistung selection react to the project change itself,
+        // instead of waiting for the project-search routine's confirmation poll.
+        const stevenLeistungTask = IS_STEVEN && targetProject
+            ? initializeStevenLeistungSelection(targetProject)
+            : null;
+
         if (customerShortCode && targetProject) {
             await initializeSimpleTimeProjectSelection(customerShortCode, targetProject);
         }
         if (hubspotId) {
             await initializeSimpleTimeHubspotInformation(hubspotId);
         }
+        if (stevenLeistungTask) await stevenLeistungTask;
+        await focusInformationAfterProjectRecognition(targetProject);
     }
 
     if (window.location.hostname === 'teambox.everii.io' &&
         /^\/app\/simpletime(?:\/|$)/i.test(window.location.pathname)) {
+        // The SimpleTime app is eagerly loaded in a hidden iframe. Browsers do
+        // not reliably move focus into controls inside a display:none iframe,
+        // even though the project and tariff automation completes. The toolbar
+        // asks us to focus Information again once the dropdown is visible.
+        if (window.parent !== window) {
+            window.addEventListener('message', event => {
+                if (event.source !== window.parent ||
+                    event.origin !== 'https://app-eu1.hubspot.com' ||
+                    !event.data || event.data.type !== 'DEA_SIMPLETIME_FOCUS_INFORMATION') return;
+
+                const currentUrl = new URL(window.location.href);
+                const customerShortCode = String(currentUrl.searchParams.get(SIMPLETIME_CUSTOMER_PARAM) || '').trim();
+                const targetProject = getSimpleTimeTargetProject(customerShortCode);
+                if (!targetProject) return;
+                simpleTimeDiagnostic('parent requested Information focus after dropdown opened');
+                focusInformationAfterProjectRecognition(targetProject);
+            });
+        }
+
         initializeSimpleTimeAutomation().catch(error => {
             log('SimpleTime automation failed', error);
             showSimpleTimeAutomationStatus('SimpleTime-Automatisierung fehlgeschlagen. Bitte Projekt manuell wählen.', true);
@@ -1108,14 +1402,6 @@ if (typeof GM_registerMenuCommand === 'function') {
         '</svg>'
     );
     const CLONE_PROGRESS_ICON = 'data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAABgAAAAYCAYAAADgdz34AAAD1klEQVR42tVVX2hbVRj/vnPubRJiL1lLRSIiWNxcY1VUtOimFxUE++DwTVQwLclNCza+9MWXey8+FSysrCY5SSFvjjUy8UUQprZTmHtZt7FIEVlHt6XdWhKbYNOmzfl8uZG7LAl1+OJ5PN93vu87vz/nAPzfF+8UJCIMhUJ8YGCALywskG3bQEQIAEzXdVxcXHzwzvPz8/wgeaZpsk5x7BScmprq7uvrewMR36rValnDMC5lMpn3AKC7Xq+vIOIVwzC2OtVQmiGxLAuDwWA3AHzMOf9EUZT+3t5eWF1d/REALkkp+3w+3zeVSuURRVFOpNPp64FA4GI+n9+3bVs2N7jvek7SYa/Xe1LTtP6dnZ2N9fX1HOc87+C/sr29PYyIXFGU76SUb29tbR1yzmE7iJCIIJfLqfl8HmzbrgkhTnR1dR2v1WpfGIax5j40Ozv7EOf8WcbYECKeiUajt5LJ5KNjY2O3nZrUktBUKnUqk8mcy2QyPc1xZ/qGiu5Zc3NzTwshPhdCvNJMPJqmyWzblolE4oiiKFcDgUBXsVj8aG1t7auenh51YmKihojUTj3BYJAT0aeIeBIRP6hWq2fj8Xj5Hw50XWcAAJzzDzVN48Vi8bLH4/nasiyKx+Mti7u4AsMw9hDxAmPsKBH97PV6n3EPwHRdrzsQva9pGgeAXDgc3rEsi9+HZZsm5XJ5CQBe8Pv9+4h49B4VISKVSiUGAKc2Nzc/Y4yddoiSBzEaEeHk5ORfAPA753yIiFYAACzLov/yycGOgWw2693d3X3H6/WyWq32azQavU1E0A7/5hsgIiWTyZc0TXusUqlsxGKx8439hpy8iNhHRNfq9frrAECWZeGBRkeE6elpHwAM1uv1KwDwlAMRAgAw0zRZOBz+ExFL4XB4GRH3s9lsoJXt20iV/H7/c4yxpXK5vAcAy+2eilUhxMuMsaW9vb1hIkIhhNrKWI3ioVAIhRAqABwrFAqXVVXVPR7PVbfC0J1cKpXCAOBXVfXsyMjITTcSDU4axnQ3E0I8T0TvAsAPsVjsvDsHXWRTIpE4pKpqVyQSuZNIJI4rihJCxHORSOQPd8GZmRmPx+MZBIBjnPPTkUjkjhCiv1AorNi2TW7/tLx+KpV6DQAGpZQ5zvkQADwMAD9Fo9Hr6XRaR8QnpJS/IeINIopJKb8cHx+/26oWa8bVNE0mpVwGgE1FUV6tVqsXEfEaY+yII9vDRPStlLJIRG8S0S8+n6/sEI4dPxwXtncB4EwymXzS5/O9yBh7HAAuOLEiY2yYc34LEb8fHR3deCBntlPPv/2T/wbd+8Un6gkbJwAAAABJRU5ErkJggg==';
-    const CUSTOMERBOX_ICON = 'data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAEAAAABACAYAAACqaXHeAAASeElEQVR42rVba7AcxXX+TvfM7O59S0IyEq/ojZF4GFBFQGREKCkYEJTDj6QwJE6cVCWpcpVCpXg44F+AwaFiiIuy/8Q4xBBI5SFACAiGUGXMG8kB8ZCRAEtISLzulXQfOzvd5+RH9+zOzM7eO5JhtrZmZmd2pk/36XO+853TBEBwhBsRIAI0hoA7tqPZPwy0mu6aiHsi+72w+50FAPuX2c717L0Q/38GGP7+7D3++WIBFQBTh4HbLka9Od5p05FuQZlwVTqgvReAfUMJGSGk06C0E1LhpYfwyN7HJc8pnEN8G8h3QBWJZYYOqNKL6T02KTQuHaHMyLfPM8JLr5H390lBeEH5OVvAmryG/HYaQEBjcGZ1InIvr/X7weJM47PC8wzCZ+7rKXz6f//ctnb4/9b6IUQgUp1nTLfFk3ktIACSm9NbETdmQ0xc0vPZkbIAFBDWC9ezI88VR54rjDx3d4SwE6h4LX0/p8feZjQPg37856jFk6nkBQ0gBTRmQ/qHgaTZmTOMggCpYWPAtroNnmuQMxTE3QJT4ZjRuU7IqHN6XQCBdDQl820MdHceF/cGCEJAuN2s8ikgDJjYCd9qul7qqZaSUSUvPEFBhABhMEtnFIr/KYy4SI+R585UVCAoKDAEAm7fn/gBENt7GjG7r2lV8AKSnRzU+YEKBjQ9d6OoAVg0LSOxkBBASDVSqAFKAyJdAkIA0YUpUOwMIrBYGBujmcTSshaaQHUFKGhYsTntTTsB5DRHCqJUcoNdhqfHyLMAJAoQxpSxUADmR6toYf3SYG50lhoJl1BNzyJNUU/LJIWGCfz0yJyztDBlRuXTqZ3y0eRr/NYnj/Cew89zYq00NIhEAZY7HZhxoTkt6GEgg7JWpWqU9evFBypoxNZCBLKkviE4fWijPq6xRimE+Ly3vnAezWksp2WzL1HnHX8t3h/7BT+/7y6zff8mK8xUDzWMsV3C5wYv4zmqaYCUnLf3GpPGytxwhVoz8oPoxMY6lf6fYUBtpSPQbyG4ZI7EN0BRgIUja9XCkbXRO8c+yZt/fU2y9+B27g81WbYdgywltke6gZAqBTlS8Ovth5ETPrFySv/V+op5z0QnNtYpAUPgJqBCAIIGQeU64mi+nY+CIg1FgW+jhYCxdPY69VdnPROtOu5P9FjTijMqlHedUpgSqNABWZ+eH3mFKWOxeviGcP2ce6O6PobciCsQ9DSm5vPdiFwHsxg0wjn0Ryv/JbpoyXfC8aYHJ9PYsUo2oAzbk2hMJFZWD18fnjNya+BGnKBKHlEKuo/oat7bFI/ao0eBd4mCry27JYAAj759azIUaWKxOYTZCypPrwEZ4SeNlRUDV+lzRr4XCKwfdVUimIDFHoF6T/9J72exkJJuc9NDgcXia8tvCc498Rv6cGxFie5gCu4d53QbQc7bAIhCbC2OCZer82fdFQm4p2cVsU49SQMAWnwYkvHVZd5mpk2RRqQHofwzWWz7ONsNBIKA8fWVP4x2j74S7z+4Q2qBgrXcEZ6rusFCyClCsnbk7qimZsONvi75G4NIYzzZK9tH77G7xh+3Y82dYjju6U16+e0sjFWoYaS2hJbOvkifveDP9FDtOBJhH/1k7YLTgkY4C1esvDv8p2fXxZb9LK5sA7IWk13vN42VJX2X6uMbF6pphYfCW2M/s0/vvy4ZjfeJduCsEzsUYKpko8AUqGTvs502fTZxQN755JfJc7t/ZC5ddnt4xvyrdPrOorawWCydd6E6Y8El+tUPNtv+UJOIdXC4ROu6JnGeqWFoKHxl4Nqgl8KKOHvw4sc3m//afXUyYfZhQAcUKQXFBCWEKCJENUIt9MeRO65HnfN6RGjUCLUaoR66vQaBmFDTCv1hQOPNfbjn1auTp3bdbFzcYXua2LVLrg0CpcCWcx5h5imQxvce6S2IVqn5jXOVm2m6VO3fGrvf/vzDm0xDO3CfWAMI0BhxAcjEZx3P0qbIbCfSBOc7X7yZ6R8GSAMTY+7HQCn0h4RN228ycxqL6IwFV+ridFCkIRAsnHOuOmnkbLXr45ekprV7oVREgqnqJRaysLEhIOgu45Oq4HiyT57evzGJFIFEYC1DKSCIgFcegnrhPxDsfRPKtKaBCZKPDQQufJ2/DHzmBpgVF4BbU4A1DEUKdU3479c3Jotmr1VD9QVdNkGEoUhjxfwN+q19LyV1BToiHODoJkYAYG54lurJixHw+ug/29HWxzKgAjLWgLQLAH92PcJXNpUYjIpbDGDnS1A7X0J0+nrYDdcjUQLYhBHpAJ9Ofiwv/uYndt3yGwPpDvMBACcMn6kCBTC7QSmLBXrYAIIVQUQRDYeLyFnZfNxGpCFgvDu+xWohsj7kDSLgPi88aUAHR4/4dOCmwP/9D/TDtyIMAieEFYEmojcOPGoF7DVTck4RAOYOLKJGGJGxAmE6Mg0QARTVUdezeiIxYycwFr8nCgJrGP2zIC8/BP3qw9A68IyRdRpR63PnVCAWpAfn6FTevVZp4LWfQy85B/bUdbATo0wagtHJ96RlJlALBvOhtR+svmg2NNURS6sn6CgnRDzjCtJQFBF6TF+GIyvgBTMt4Nn73DPZ84CLV8FecSNM3zDEmAzclh4cnqe6Jw6CNt+B4P1t0ORp762PIjjlfNi0D42JwWx7a5CKiKC7o8LppgC4w/l1/MfMNLkKgPHPQJ/tBdX63Yj3DQNX3AQzfxkkqDvGuTEA1Abcvj7gfqv54/qg+wYRcOxiyCV/C6ODTmd+9C7UxBhIBQ4nCByD0vMjAvHUXBYSz+wFpHf4WBo7kFPXIAQ2PoA4BTaKHGt86FNv3bOgp8jhIQ/CJg8C9UFIUAPiCZ+HaHU6w2kqQSPMxA15G6B1CAE5wflIKTEu1Q/MxB/UB/PssUnyz20Lj95wOBeK92ifwyuCSTMmAiYLCxJqB2SKNJrJIRGWHC9QzQhy9SxRej/73ELS6ghjrdOCIMgYVgGgO4kRztqctJMMUB8CRg+ATNxJ1OjQk58iUABicxC3PrEyhqg28dohWQnCjFZyCFq5zmI5gikAdqpdaQpkcoApry/ikJxNgPFR1xkocnRlVLjnNEb3gx67E4E1zh2yBeYtBDeGIM1xD2wgmIoP5mj21MCmz9aUT7BM2wHFTNCMbG5JBofZjVIYAdu2QL28CcG+t6HSqVA1+9ya9MaYOgKdfhGMUq4z0lRYQJQqgLuXnJZ1stKClJ6ojgM4g9NnYHVy+N4LrzTw799FuHXz0SNBwHmWNB2+4gLY5WvA4wc7eUA3hcozRllNm44T7GkEWSryVunI+x4OI+DBGxFu2+KQoPIe4mg29v9b+fuwF21EksSZNvEMucus8Fmi54hoca5uA6wF+kYg2zZDb9sCrbRHguI0ImpUL2AQcS71S4vBp66HOXkNOGm6dxDyQhGo08w0t5hGmGlOcRqvEvQa0aqUVdu6ez/94n8iSJEbBFh4Juxl18LUB1343jMXWCBNoIC+AR8OH+oIVxz5lpWc4ebMnqTTjl7EaFAWDMkMRrDYAWyd6o9/Btq/Eyr9TYfA5dfCzFsCmRzrxLqlZTTZc//ceBIwpmPwst5GfNDWiIaQWkHOpu5BYGHE8SGwCLRUnAJlDZwRB/hDazsZWBEgrAG1QSe8TaaZs9ydhEnfH0R59+nsCcGyoB4M47uXvl6rR0PEYtsIUESglEazdUhufPDUeKI5Bk3ks0sVcQAfQblMNpAp8yjdJGuhmALd6XbrPUpr0hnD9FIQ+nnOXgNqI1QLBnq4U0UAwVpAgoqkaI4/k1ybSiPC1E1Bu+tB6MgMIocKJw+Bjp3rtIBUgfxU3XlIiDOcfUPAR++B7r8WNTa+GGIQcuXtiKOGf2cgsJy0g5+2BvhjwwnYSh7gzUSI5JEaVXODcML2zYJ8aQmYfAxvE2DzHQg+fAfUagKTh4HmuPtOjXeO4wm/PwxMHXLFGR+9B3rybgTNw65gI2kCQ/Mg9SGITTr2qkpiRbIGslKVGKdYwIKl1WvwoUhDo9ZGgEoBZ18O8+4riFJk9v426B99E7rLDU6HMskJzNYdp8UPp/2BR4JeIwJVK0mSdNTV2ljYk6G9WOHS1FjqLqxtYjIZ7Wpx2huh6sdwtJCMJZBSGB8FrbgAfNp62BSuKo/j05FufyfLv61Jd509kwRfkXbyGthlq8FTh0BKKxhDmN2/iKKgH+jiBF1bx5tjSEyzk++swgm60RdoEKaSlozGuyS1rNlUFIsFkcLSORfrxIqQLyhqTQGXXYfktPWugoXN0UNhtq7RX/4q7Lq/cUjQCUFoGZFTT7hYu4wQ55Q0beuBsV0y0WxJoKhndjToHeMrtKzF/vGtvHTWxQol2TgAWDX/W/q53T804/EnCEjBGgYp4PLrkSxZDfurLQj2vwNlk5JCo14zwSPBuYvAp1wAs2w12LScTVFKoRlbHDM4l7667Fsa05RhvP/xVo4ToC9UENhSgmtaRigg0I7PHrHnHX9DoEpycSKMwfoCunTZneE9r34j6Q9dptYmjGYCnHYh+Mtr0Jo8WGRyMjxCoYQurSsEOXKFFNA87FN1SoENYTJm/OUFd4bD/fPL84TK5Qm37XrEhhpk2RVkVQJCbH1ZmVjUFGHPoVd4z6Hn+KTh31Np9jffCRZnzL9SX3byu7LpzZtMXQORp4THRwVEQNgoR3JSFL5Q2dGaAsQApAlKKzRjg4kYuPK8m4PfXXKlLssUu98Udux9jnfue4UbERGzbdcbVs4MsQW0ctPg2T3fNycNr4l6VWsIGBcuuTGY3fgd2vTGdcmnE/skII9gBZDmNHWGRURYUnFqmoKWYTlm8Dj6i7W3hauXXqVZuNwD+Am65dXvm6ZhDIQ+q1U1GkSGPbVi0dCKth941O5a8BQvnn2hKut1l6hkfOW4q/TiOReoF3f/1L554HH76cQ7Yk3cVeLKMwifNpQF0FTDnL6ldOqJFwVrln1Tj/S79HhxSmZrB97Y/RQ/t+NR21dTZI1FWtJQhgRztcL1fuDvHkKzMeC5PbhawKmEMbdvOf31qudq9WDEc/e9G9BOb5nDvlrEFy5SIQFYsR6oHg72fEc2HwgAU/FB3Phv58QffLJD6oGCZZcdVsq52YduQT1p9qgVziYtmH2IC0Yj0Pjw0A5+6K1vt/741PsihnWkXMH6ppnZNDlZCwY/t8Io9mn4crWXdgD0k6e/3Xpv/w4eamgy1ub4zZ5VYlJSHyCesRUGEmPRCDW9sOd++9ivbzCuEIHbvV50j2mu7vP6wNPcRFQ68i75qfHAs98xT/7qPpsVvlh8UT0c9lUaHcLCYiDU9MSO2wyz4JKTb3MpMDHt+r1ypPDFbcwGSgUgAh549u/Ng7/8nhluuILJsnSYVGKFuZAbQDaQYPSFGo/tuD0Zm9rHX1/xj2FfdAyJ/5OzC198rWAa+ysVYKL5qfz0f69Jnth2rx1paGLhLjcr00Dh8gqRtDyOUFi742LfoUjTC7/5V7t7dKv84cofhMvnZUplxbSrtiotQKoUbfqpIAKlgrYdeO39J/neZ65Jdn24nWf15dW+q0S2aolMdu1Or8JjFjcdDhx8Q+5+dn182vwN+vzFG4PFc9coRZ9zsTRlphO5mqS3P/gFP77tLvP8jk0WABXnfBFUsQCKu0mXciTI+SVuXQgNaZGCRaQVRJi27n3EvrbvET5heBWtnH+pPmHWmWruwFLqr80iraIjWphXXJNgbAvjzVHZP7ZT9nzyGr+662F+Z+8LHBtIXw1EUJhO+Bz0rgqEei1VExRXd7lJ1R84w/PeJy/L2/tfTkIFNIIaKVVzhVWZFDU4XxxVXESVR4wEZgtjYoy3YoljINSgegiE/p3MPKPw0+U5uqeAD2GZ8yntXguiyBslEaAeKjQCImaG4Rhs4hwTk2Vmsm6JOT9fbfb53oc3NFFfn4KIwAiD3VqFXG1zlkztSpBUrQ/QgQtFOZvoLOPw/HIXm2SmhgcPArQriVllcnVp7s66Z6WNVSqvCSpFjQywdnvrDXBOczySUZTPTSopeC+4d5SA125SdOowiBnSprdRUjafcZc6ysyzXBpKZly5kVtX2NPgdrvkXP1Bq2CvuITa9wxz0sytyOnEAtmzWl816yQMhHXIn/4Qca3hskLtgKPCshWRksqQGYTPJlBIAckksPkfUEuapaFJV7sFblXctBqQlqNUQ2I+MVfQii9i5LNaiEzaPGmCypbDVd2Ccr9bwTf7wihItSytFJfXTnP/dMK364/SijKdiWoEFfi2KsnRqg47G8tzeZFFl9oXlrJUFh7lREoO2BzFAur/Bxf47vd3pwiOAAAAAElFTkSuQmCC';
-    const CUSTOMERBOX_LOADING_ICON = 'https://raw.githubusercontent.com/everii-RENE/dea-hubspot-overlay/refs/heads/master/img/loading-indicator-hd.gif';
-    const CUSTOMERBOX_TEAMBOXES_URL = 'https://customerbox.intevo/index.php/teamboxes/index/';
-    const CUSTOMERBOX_API = 'https://customerbox.intevo/index.php/api/';
-    const CUSTOMERBOX_LOADING_URL = 'https://customerbox.intevo/';
-    // Several tabs may wait in the cross-tab request queue. The timeout is
-    // only a safety net and must not expire while a request is still pending.
-    const CUSTOMERBOX_LOADING_TIMEOUT_MS = 120000;
     const BAR_HOVER_BACKGROUND = BAR_BACKGROUND === '#2d3e50' ? '#536477' : '#3d3d3d';
 
     const ICONS = {
@@ -1135,18 +1421,12 @@ if (typeof GM_registerMenuCommand === 'function') {
         reload: '↻',
         customerTeambox: 'data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAEAAAABACAYAAACqaXHeAAAEkElEQVR42u2bTYgcRRTHf9U7s4miSUxccUNCDoGQIB48CYp6EBU8KXiJh0DIISE5xEPIITl7FUFvfoAHvagHwS/UgwdFMFFCDiaQEEI+IGtIou4m2Z2d7vaw77HFMN3TPVNVXcNOQVHL9EzV63+99/7vvaqFldYCLgE5kMo4Dj2T8RawSd7FUKO1Cj5XIGJuUy4mKQLAlDyLqeU+ADDADeBHIHGxiONmRDufB3a4mtT2ATnw/Rjs/ieWvM59QFueJeJoYrP9FFjn0wfkQDdSAGymGrklrPG25gGoS3WmQbWPAoB8LWtAIlRjBIiQ2vCPr8i0VfHFM2AWOA2sbwCAZ4G/fPisuhqwGZge17h/VABMQy9fxFZ2NpiFAGAJ+EUisNAmcLcgWlVgHvIJgKI7BzzXsNPOLHO4BZwDbkvUmvvWgFjiAGWDt4DFPrLlPgGIIQ4wovqdHt9gpGd1fMI4FD36ZYJphe9lVTZsnABI5MVbwEvAy8ATQs0d4BrwG/A1cKEHsNoFkZ8K6CcJ1Omj2gBvAGcpL5TeBz4CttaJIaoC0JS9G+B9S74usCxjKqN+pt+5DrwwCIRWTYe5NQATGOCK2LCq/cfAfqtIMzXAUXdF1u+AF8U0Sos7ZRqgWrAN+Feo576MLvtdGb+VNduy7hGRaYl6ZwYaG1wTP5GUbV4VALYD9wTF1KIbV13V93Vr7ccF9JThDmx0zneKTCGp6YUf6LFLl70FzLNajs+AA8AGyxyGoc1c5pkREE1dH6Bceg/4RhIi17mA0tsfwIIIboDXRlxLzxA2CHV+JnN3Y2YBXXMG+K8n68uHNIMMeLffpreGFC5Em7GyPOOAWbb1C+frApAF1IDEkZmZss2LuSx+R+h21CRMf/t3P22KEYCM1QPayw6z0DMukqFQgCXiqX8A9oxAg7l4/WWZq9CMY8sFNGDZY8X5wzCBBkKfFwVCdTSgDezynAsYEfq8CHsOeE+qPx3qFWVVaxaBE6yeZ4wUCi/h/85PCrxigb4e+FWedypqQtcKnfdVSYurArAgO9SR0XVfEuHPA1usiHAz8HOPand7cgk7LVYwD1etCVQBYAdhb4Ads7RAx7clXxj021NVagF1c4EF4FNPuYC9zjzwgdCW1vbaMp5k5WrMXimJ7QQelt2fA/4EvgC+Ei1dJ88G1ghjrQhVadNUPzobiQXA4xldTwywLH/vFuZ50Nq9xEqXl63AacoyF/sKTQ7cZOVgd76oMhSLBuh6s8CXosaufMpV4GCZJjQNgBZatgj/qyfvOuh2Nel4PxBiAEAF+lBkWHTMKqlFnU/q+yUDdiREtys3s8CbIuS0B/NS9jqkn5XdEwx5YVrL309J3THzFHIrCE+rsyy7KboR/xcljcQX2h61bD/xuOYmMbm+AGTAM8DFAHn/FPAq8LvjKlAVTTC9cYDtJFqyGz6b2mO7ySjKBuARwp4Wm4DB1UAAconzHyPc/R9dZ25Qrh4CgBQ42vBGdJs2gaZUMYvFB8T+T1Jek4812yYATACYADABYALABIB4mgm9TmwAdAKto9Vk/gfCq2hYx7a0EwAAAABJRU5ErkJggg==',
         featurebox: 'data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAEAAAABACAYAAACqaXHeAAAEnUlEQVR42u2aTYwUVRDHf93TI7Ic+DIhJLiYKBgTEg+GhJuJAiIXhQS9eFgjB8PNeEI5eECvGgMm3kz0QCBssoknIwQ4oQfCgQQCXvAzRuMXDiLb081hqrLFy+z0zvTreb1Dv+Sle3peV7/6V716/6pu8N8SOc4AOTAvx1G63jvjyPY+2cVaBMRDyOsyntYaYmwmII4EQD5GpQgBdDLA8jmwEXhKzqMBIEXAbeDimADYAUwtcV5XgV+MTkMBc3CI9XrTcc8qYoDKvjmEjIODjF20BOZlDaUDxmYSJzp9rqfSR22pkWVbR65lA2KUznneRxCMC4Jhv/9XivzEwxJdOeB5ccGcojIAjNLUWt8A7xVYaSmyYpHVzxMq3wZHaRp8Lkv31YYKYqEAiM1kIwlaeZEbLgHMrglqtQUg6+OiKdW0rE4AqHU3A2fGxAM2O8+uBQBTwHNjZoRR3WJAHXOBsQLQYpm1mAe8NQA0ADQAVN6yKjh8nXOBfskMfZIin1tmKzQAuSjYchRsAVeAf6WKY+sKrUnxgNwkPmplVfQGsAv4BzgHbDdjLtIro42a5el9UwJuJcDMMLispVnaz8BxOb8rx+vAtJnsWuAsC5WiaU9znTbzyRiypJ54WN9/AS8D3wI/Ae+L5XcC38szMuBP4HfD31cDKzx4wOoql8ZiHqCR/Vdgm4xty/EQ8KS5pstj1vGaDZ7muiGUB+Ry/3rzOwY+MUEulWsngX1OEDxiPKKMBzwSwgMs2neBF8x9Lelq+dNObBhXX5IHlCFCkYDQBuYEhNTZDU4C+2Uy7T7VIl+dULuAXdN3gD1m7Yey/NhigPWiTCL6HHAAeNVYPqFcYXRZUOFYlHxIQNBtMjGKuyD4rPBGoQFwS9a5mVhHlsFaJx+IJskDIhMUY7Ml3gH2An8A54F1xhP+9pQlxmXIUOLB8urul4FnTMT/XxjiBRmzFzhBr6SdAbuFMcYjAqH3bWHh1Zm3WDMMD8iBNxy2d9twg7YESIBjRt7WkktB79tahgmWocJd4JZ5gL6N/UIsr8qrrHedbXOTp+W3KRQV1nX8pQEgBV4zVDiXa4eBo04QfB74wQMVfjQUEVJLfmdS28R4gso4bGRkk0SFYwHhceBrASE1AKjlPzAUOepTK/TRgxVFNePb4oBQpLyNGT560KpwYkA4IyC8XaD8xFFhrfo8AVySGkFuCp8TnwvY9Hj9Ivt17vz2+a4gDg1AbrYlVbQr8t+Sys/nzth4UjzAfie4ioUXHomQn4/k9yrgY/PM1z3ygM9CUGHLBY4LJb1h/nvHyHpYzj808mrBBMsSoRT41JnMNXrfB6ocLYW9CPxm9u5a5AJJCbeP6NX93zS8/0fJCDssfKU5L5nfrHiCuukaqRGUzQbXhIgB+vDHpPb3itnzOybIqfJzorzNBb7yWA8oXRkqGwNmub8UrvfvBv5zxk5MLoCx8j7glJGXDrC8W0bz0YNS4bYB4bRYemeB8raM5qMHZ4JtUfwleq/Bny5QfiKpsL4Reta4eO2/QYorkNetc/JTpQdYT1g2rflMrgGgAaABoAGgAeABbvcAvzOEl9zFAoAAAAAASUVORK5CYII=',
-        supportbox: 'data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAABAAAAAQCAYAAAAf8/9hAAAANklEQVR42mNkWPX/PwMFgImBQjDwBrAgc/6HEqeJcTWtXIBsMrKL0MWHWSwMsnSAL76HcRgAABF5CCaTH5ImAAAAAElFTkSuQmCC'
     };
 
     const state = {
         ticketId: null,
         data: null,
         youtrackIssues: new Map(),
-        customerboxData: null,
-        customerboxSessionError: null,
-        customerboxLoading: false,
-        customerboxLoadingTimeout: null,
-        renderMode: null,
         lockedDeaUrls: new Map(),
         loading: false,
         ticketOwnerAccess: null,
@@ -1235,59 +1515,9 @@ if (typeof GM_registerMenuCommand === 'function') {
                 pointer-events: none !important;
             }
 
-            /* Oldstack uses the same effective brand-to-context spacing as DEA.
-               Keep this purely presentational so it cannot affect loading. */
-            #${BAR_ID} .dea-brand.dea-customerbox-link {
-                margin-right: -6px !important;
-            }
-
             #${BAR_ID}.is-loading .dea-brand {
-                /* Same effective spacing as DEA and loaded Oldstack brand:
-                   12px flex gap plus -6px right margin = 6px. */
+                /* Keep the brand aligned with the context and links. */
                 margin-right: -6px !important;
-            }
-
-            #${BAR_ID} .dea-login-link {
-                display: inline-flex !important;
-                align-items: center !important;
-                gap: 5px !important;
-                min-height: 24px !important;
-                color: #cbd6e2 !important;
-                font: 12px/1.2 Arial, Helvetica, sans-serif !important;
-                text-decoration: none !important;
-                pointer-events: auto !important;
-                cursor: pointer !important;
-            }
-
-            #${BAR_ID} .dea-session-expired {
-                color: #ff6b6b !important;
-                font-style: normal !important;
-            }
-
-            #${BAR_ID} .dea-login-link,
-            #${BAR_ID} .dea-login-link *,
-            #${BAR_ID} .dea-login-link:hover,
-            #${BAR_ID} .dea-login-link:hover *,
-            #${BAR_ID} .dea-login-link:focus-visible,
-            #${BAR_ID} .dea-login-link:focus-visible * {
-                cursor: pointer !important;
-            }
-
-            #${BAR_ID} .dea-login-link:hover,
-            #${BAR_ID} .dea-login-link:hover *,
-            #${BAR_ID} .dea-login-link:focus-visible,
-            #${BAR_ID} .dea-login-link:focus-visible * {
-                color: #ffd100 !important;
-                text-decoration: none !important;
-                font-style: italic !important;
-            }
-
-            #${BAR_ID} .dea-login-link img {
-                width: 22px !important;
-                height: 22px !important;
-                object-fit: contain !important;
-                display: block !important;
-                pointer-events: none !important;
             }
 
             #${BAR_ID} .dea-context {
@@ -1451,7 +1681,7 @@ if (typeof GM_registerMenuCommand === 'function') {
                 font-weight: 400 !important;
             }
 
-            /* 2.4.4 DEA reference: Customerbox loading must match this exactly. */
+            /* DEA context typography. */
             #${BAR_ID} .dea-context,
             #${BAR_ID} .dea-context strong,
             #${BAR_ID} .dea-context .support-agent {
@@ -1489,8 +1719,7 @@ if (typeof GM_registerMenuCommand === 'function') {
                 padding: 0 !important;
             }
 
-            #${BAR_ID} .dea-link,
-            #${BAR_ID} .dea-customerbox-link {
+            #${BAR_ID} .dea-link {
                 pointer-events: auto !important;
                 display: inline-flex !important;
                 align-items: center !important;
@@ -1508,9 +1737,7 @@ if (typeof GM_registerMenuCommand === 'function') {
             }
 
             #${BAR_ID} .dea-link:hover,
-            #${BAR_ID} .dea-customerbox-link:hover,
-            #${BAR_ID} .dea-link:focus-visible,
-            #${BAR_ID} .dea-customerbox-link:focus-visible {
+            #${BAR_ID} .dea-link:focus-visible {
                 background: ${BAR_HOVER_BACKGROUND} !important;
                 outline: none !important;
             }
@@ -1566,7 +1793,7 @@ if (typeof GM_registerMenuCommand === 'function') {
             }
 
             /* YouTrack and GitHub are intentionally one pixel larger in both
-               DEA and Customerbox/Oldstack views. */
+               DEA and / views. */
             /* Keep the corners consistent across the DEA brand, main service icons,
                and the Sysops YouTrack menu icon. Only the corner radius changes. */
             #${BAR_ID} .dea-brand img,
@@ -1720,9 +1947,8 @@ if (typeof GM_registerMenuCommand === 'function') {
                 background: #ffffff !important;
             }
 
-            /* One shared tile hover for DEA and legacy icons. */
+            /* One shared tile hover for DEA icons. */
             #${BAR_ID} .dea-links a:hover,
-            #${BAR_ID} .dea-customerbox-link:hover,
             #${BAR_ID} .dea-brand:hover {
                 background: ${BAR_HOVER_BACKGROUND} !important;
                 outline: 0 !important;
@@ -1868,21 +2094,6 @@ if (typeof GM_registerMenuCommand === 'function') {
         }
     }
 
-    function isCustomerboxSessionExpiredResponse(value) {
-        const text = String(value || '')
-            .replace(/<[^>]*>/g, ' ')
-            .replace(/\u00a0/g, ' ')
-            .replace(/\s+/g, ' ')
-            .trim();
-        return /Anmeldung\s+in\s+\[C\]\s+erforderlich/i.test(text);
-    }
-
-    function isCustomerboxSessionExpiredError(error) {
-        return Boolean(error && error.customerboxSessionExpired) ||
-            isCustomerboxSessionExpiredResponse(error && error.responseText) ||
-            isCustomerboxSessionExpiredResponse(error && error.message);
-    }
-
     function apiRequest(method, endpoint, ticketId, payload, requestOptions = {}) {
         return new Promise((resolve, reject) => {
             const options = {
@@ -1945,277 +2156,6 @@ if (typeof GM_registerMenuCommand === 'function') {
             }
             GM_xmlhttpRequest(options);
         });
-    }
-
-    // Customerbox uses one shared browser session. Serialize rt_data
-    // requests across HubSpot tabs so ten simultaneously opened tabs do not
-    // authenticate against the same session at the exact same time.
-    // Match the legacy Customerbox overlay: successful rt_data responses are
-    // reusable in this tab for 20 seconds and can be rendered immediately.
-    const CUSTOMERBOX_CACHE_TTL_SECONDS = 20;
-    const CUSTOMERBOX_SESSION_RETRY_DELAYS_MS = [400, 1000, 2200, 4500, 8000];
-    const CUSTOMERBOX_REQUEST_LOCK_NAME = 'dea-customerbox-rt-data-session';
-    const CUSTOMERBOX_REQUEST_LOCK_KEY = 'dea_customerbox_rt_data_lock_v1';
-    const CUSTOMERBOX_REQUEST_LOCK_TTL_MS = 120000;
-    const CUSTOMERBOX_REQUEST_LOCK_POLL_MS = 120;
-    const CUSTOMERBOX_REQUEST_LOCK_OWNER = `dea-${Date.now()}-${Math.random().toString(36).slice(2)}`;
-
-    function waitForCustomerboxRetry(delayMs) {
-        return new Promise(resolve => window.setTimeout(resolve, delayMs));
-    }
-
-    function readCustomerboxStorageLock() {
-        const raw = safeStorage.get(localStorage, CUSTOMERBOX_REQUEST_LOCK_KEY);
-        if (!raw) return null;
-        try {
-            return JSON.parse(raw);
-        } catch (error) {
-            return null;
-        }
-    }
-
-    function acquireCustomerboxStorageLock() {
-        return new Promise(resolve => {
-            const deadline = Date.now() + CUSTOMERBOX_REQUEST_LOCK_TTL_MS;
-            let timer = null;
-            let finished = false;
-
-            const fail = () => {
-                if (finished) return;
-                finished = true;
-                if (timer !== null) window.clearTimeout(timer);
-                // null means that localStorage is unavailable or the fallback
-                // lock could not be acquired. The caller then uses the request
-                // without this optional coordination layer.
-                resolve(null);
-            };
-
-            const attempt = () => {
-                if (finished) return;
-                if (Date.now() > deadline) {
-                    fail();
-                    return;
-                }
-
-                const current = readCustomerboxStorageLock();
-                const now = Date.now();
-                if (!current || Number(current.expiresAt || 0) <= now) {
-                    const candidate = {
-                        owner: CUSTOMERBOX_REQUEST_LOCK_OWNER,
-                        token: `${now}-${Math.random().toString(36).slice(2)}`,
-                        expiresAt: now + CUSTOMERBOX_REQUEST_LOCK_TTL_MS
-                    };
-                    const written = safeStorage.set(localStorage, CUSTOMERBOX_REQUEST_LOCK_KEY, JSON.stringify(candidate));
-                    if (!written) {
-                        fail();
-                        return;
-                    }
-                    const confirmed = readCustomerboxStorageLock();
-                    if (confirmed && confirmed.owner === candidate.owner && confirmed.token === candidate.token) {
-                        finished = true;
-                        const heartbeat = window.setInterval(() => {
-                            // Bei Storage-Fehlern läuft die eigentliche Anfrage trotzdem
-                            // weiter; die TTL schützt den Lock, falls der Storage-Zugriff
-                            // fehlschlägt.
-                            const active = readCustomerboxStorageLock();
-                            if (active && active.owner === candidate.owner && active.token === candidate.token) {
-                                safeStorage.set(
-                                    localStorage,
-                                    CUSTOMERBOX_REQUEST_LOCK_KEY,
-                                    JSON.stringify({ ...candidate, expiresAt: Date.now() + CUSTOMERBOX_REQUEST_LOCK_TTL_MS })
-                                );
-                            }
-                        }, Math.max(1000, Math.floor(CUSTOMERBOX_REQUEST_LOCK_TTL_MS / 3)));
-
-                        resolve(() => {
-                            window.clearInterval(heartbeat);
-                            // TTL-Ablauf ist der Fallback, falls das Entfernen fehlschlägt.
-                            const active = readCustomerboxStorageLock();
-                            if (active && active.owner === candidate.owner && active.token === candidate.token) {
-                                safeStorage.remove(localStorage, CUSTOMERBOX_REQUEST_LOCK_KEY);
-                            }
-                        });
-                        return;
-                    }
-                }
-
-                timer = window.setTimeout(attempt, CUSTOMERBOX_REQUEST_LOCK_POLL_MS + Math.floor(Math.random() * 80));
-            };
-
-            attempt();
-        });
-    }
-
-    function withCustomerboxRequestLock(task) {
-        if (navigator.locks && typeof navigator.locks.request === 'function') {
-            return navigator.locks.request(CUSTOMERBOX_REQUEST_LOCK_NAME, { mode: 'exclusive' }, task);
-        }
-
-        return acquireCustomerboxStorageLock().then(release => {
-            if (typeof release !== 'function') return task();
-            return Promise.resolve()
-                .then(task)
-                .finally(release);
-        });
-    }
-
-    function createCustomerboxSessionError(response) {
-        const status = Number(response && response.status);
-        const responseText = String(response && response.responseText || '');
-        const authRequired = status === 401 || isCustomerboxSessionExpiredResponse(responseText);
-        const sessionError = new Error(authRequired
-            ? 'Anmeldung in [C] erforderlich'
-            : 'Abgelaufene Session');
-        sessionError.customerboxSessionExpired = true;
-        sessionError.customerboxAuthRequired = authRequired;
-        sessionError.responseText = responseText;
-        sessionError.status = status;
-        return sessionError;
-    }
-
-    function getCustomerboxCacheKey(ticketId) {
-        return `rt_data/${String(ticketId || '').trim()}`;
-    }
-
-    function readCustomerboxCache(ticketId) {
-        const key = getCustomerboxCacheKey(ticketId);
-        if (!key || key === 'rt_data/') return null;
-
-        const ttl = Number(safeStorage.get(sessionStorage, `${key}_ttl`));
-        const response = safeStorage.get(sessionStorage, `${key}_response`);
-        const now = Math.round(Date.now() / 1000);
-        if (!response || !Number.isFinite(ttl) || ttl < now) return null;
-
-        const data = readJson(response);
-        return data && typeof data === 'object' ? data : null;
-    }
-
-    function writeCustomerboxCache(ticketId, data) {
-        const key = getCustomerboxCacheKey(ticketId);
-        if (!key || key === 'rt_data/' || !data || typeof data !== 'object') return;
-
-        const now = Math.round(Date.now() / 1000);
-        const ok = safeStorage.set(sessionStorage, `${key}_ttl`, String(now + CUSTOMERBOX_CACHE_TTL_SECONDS))
-            && safeStorage.set(sessionStorage, `${key}_response`, JSON.stringify(data));
-        if (!ok) log('Customerbox session cache unavailable');
-    }
-
-    function customerboxRequestOnce(ticketId) {
-        return new Promise((resolve, reject) => {
-            GM_xmlhttpRequest({
-                method: 'GET',
-                url: `${CUSTOMERBOX_API}rt_data/${encodeURIComponent(ticketId)}`,
-                timeout: 90000,
-                withCredentials: true,
-                onload(response) {
-                    try {
-                        // Customerbox's original Oldstack overlay treats
-                        // HTTP 401 as an authentication requirement, even when
-                        // the response body contains no readable message.
-                        if (response.status === 401 || isCustomerboxSessionExpiredResponse(response.responseText)) {
-                            reject(createCustomerboxSessionError(response));
-                            return;
-                        }
-                        if (response.status < 200 || response.status >= 300) {
-                            throw new Error(`Customerbox-Abfrage fehlgeschlagen (${response.status})`);
-                        }
-                        const data = readJson(response.responseText);
-                        writeCustomerboxCache(ticketId, data);
-                        resolve(data);
-                    } catch (error) {
-                        reject(error);
-                    }
-                },
-                onerror() {
-                    reject(new Error('Customerbox nicht erreichbar'));
-                },
-                ontimeout() {
-                    reject(new Error('Customerbox hat nicht rechtzeitig geantwortet'));
-                },
-                onabort() {
-                    reject(new Error('Customerbox-Abfrage wurde abgebrochen'));
-                }
-            });
-        });
-    }
-
-    function customerboxRequest(ticketId, attempt = 0) {
-        const lockStart = performance.now();
-        // A confirmed authentication failure is final. Retrying a 401 only
-        // delayed the legacy "Anmeldung in [C] erforderlich" indication.
-        return withCustomerboxRequestLock(() => {
-            markTiming(`Customerbox-Lock erhalten (Versuch ${attempt + 1})`, lockStart);
-            return customerboxRequestOnce(ticketId);
-        }).catch(error => {
-            if (error && error.customerboxAuthRequired) throw error;
-            if (!isCustomerboxSessionExpiredError(error) || attempt >= CUSTOMERBOX_SESSION_RETRY_DELAYS_MS.length) {
-                throw error;
-            }
-            const baseDelay = CUSTOMERBOX_SESSION_RETRY_DELAYS_MS[attempt];
-            const jitter = Math.floor(Math.random() * 250);
-            const retryDelay = baseDelay + jitter;
-            log(
-                `Customerbox session response; retrying request ${attempt + 1}/${CUSTOMERBOX_SESSION_RETRY_DELAYS_MS.length} in ${retryDelay} ms`
-            );
-            return waitForCustomerboxRetry(retryDelay)
-                .then(() => customerboxRequest(ticketId, attempt + 1));
-        });
-    }
-
-    function getCustomerboxToken(data, teambox) {
-        return String(
-            (teambox && (teambox.token || teambox.customer || teambox.customer_token)) ||
-            (data && data.teambox && (data.teambox.token || data.teambox.customer)) ||
-            ''
-        ).trim();
-    }
-
-    function getCustomerboxInstallUrl(data, teambox, ticketId) {
-        const token = getCustomerboxToken(data, teambox);
-        if (!token || !ticketId) return null;
-        return `https://live.teambox-supermaint.service.de1.everii/api/api.py?customer=${encodeURIComponent(token)}&rt_ticket=${encodeURIComponent(ticketId)}&module=install`;
-    }
-
-    function getCustomerboxInstances(data) {
-        return Array.isArray(data && data.instances) ? data.instances : [];
-    }
-
-    function getCustomerboxSupportInstance(data) {
-        const instances = getCustomerboxInstances(data);
-        return instances.find(instance => {
-            const target = String(instance && (instance.target || instance.host || instance.domain) || '').toLowerCase();
-            return target === 'support12' || target.includes('support12');
-        }) || instances[0] || null;
-    }
-
-    function getCustomerboxSupportUrl(data, teambox, ticketId) {
-        const token = getCustomerboxToken(data, teambox);
-        if (!token || !ticketId) return null;
-
-        const instance = getCustomerboxSupportInstance(data);
-        if (!instance) return null;
-
-        const target = String(instance.target || '').toLowerCase();
-        if (target === 'support12' || target.includes('support12')) {
-            return `https://${encodeURIComponent(token)}_${encodeURIComponent(ticketId)}.support12.everii.at`;
-        }
-
-        const instanceTarget = String(instance.target || '').trim();
-        return instanceTarget
-            ? `https://${encodeURIComponent(token)}_${encodeURIComponent(ticketId)}.${instanceTarget}.intevo`
-            : null;
-    }
-
-    function getCustomerboxLiveUrl(data, teambox) {
-        const token = getCustomerboxToken(data, teambox);
-        if (!token) return null;
-        return `https://live.teambox-supermaint.service.de1.everii/index.php?customer=${encodeURIComponent(token)}`;
-    }
-
-    function isCustomerboxMode() {
-        // The mode is selected once per ticket. A successful DEA response
-        // permanently owns the bar until the ticket changes.
-        return state.renderMode === 'customerbox';
     }
 
     function joinUrl(base, path) {
@@ -2475,18 +2415,10 @@ if (typeof GM_registerMenuCommand === 'function') {
             if (!stillCurrent()) return;
             if (getApiOwnershipState(data) === false) continue;
 
-            const resolvedMode = await resolveRenderMode(data);
-            if (!stillCurrent()) return;
-
             state.data = data;
             state.ticketOwnerAccess = getApiOwnershipState(data);
-            state.renderMode = resolvedMode;
             rememberRevision(data, ticketId);
-            if (state.renderMode === 'customerbox') {
-                renderCustomerboxMode();
-            } else {
-                renderData(data);
-            }
+            renderData(data);
             loadYouTrack(data, ticketId);
             return;
         }
@@ -2525,7 +2457,17 @@ if (typeof GM_registerMenuCommand === 'function') {
             window.setTimeout(() => { status.title = originalTitle; }, 6000);
         } finally {
             syncNowActive = false;
-            // Die Leiste kann zwischenzeitlich neu gerendert worden sein.
+            // Die Leiste kann zwischenzeitlich neu gerendert worden sein. Auch
+            // den DEA-Button in der Fehlermeldung wieder in den Normalzustand setzen.
+            if (status.isConnected) {
+                if (status.title === 'HubSpot-Sync läuft …') {
+                    status.title = originalTitle;
+                    status.setAttribute('aria-label', originalTitle);
+                }
+                status.classList.remove('is-syncing');
+                status.removeAttribute('aria-busy');
+                status.querySelectorAll('.dea-sync-spinner').forEach(spinner => spinner.remove());
+            }
             document.querySelectorAll(`#${BAR_ID} .dea-owner-status.is-syncing`).forEach(element => {
                 element.classList.remove('is-syncing');
                 element.removeAttribute('aria-busy');
@@ -2613,8 +2555,7 @@ if (typeof GM_registerMenuCommand === 'function') {
     function getTeamboxId(teambox) {
         if (!teambox) return null;
 
-        // The Customerbox id and the DEA/Deployment Tool id are not always
-        // identical. Prefer the deployment-side id for DEA and terminal URLs.
+        // Prefer the deployment-side ID for DEA and terminal URLs.
         const deployment = teambox.deployment || teambox.deployment_tool || teambox.deploymentTool || {};
         return teambox.deployment_id ||
             teambox.deploymentId ||
@@ -3631,25 +3572,6 @@ if (typeof GM_registerMenuCommand === 'function') {
         parent.appendChild(separator);
     }
 
-    function activateOldStackView() {
-        state.renderMode = 'customerbox';
-        state.customerboxData = null;
-        renderCustomerboxMode();
-    }
-
-    function activateDeaView() {
-        clearCustomerboxLoadingTimeout();
-        state.renderMode = 'dea';
-        state.customerboxData = null;
-        state.customerboxSessionError = null;
-        if (state.data) {
-            renderData(state.data);
-            if (state.ticketId) loadYouTrack(state.data, state.ticketId);
-        } else {
-            reloadOverlay();
-        }
-    }
-
     function addDeaUpgradeDropdown(wrapper, link, target, teamboxId, teambox) {
         if (!wrapper || !link || !target) return null;
 
@@ -3702,18 +3624,6 @@ if (typeof GM_registerMenuCommand === 'function') {
             href: target,
             icon: ICONS.upgrade,
             title: 'Upgrade / Custom Deployment'
-        });
-
-        // [C] loads the Old Stack bar in the current HubSpot tab. It is
-        // intentionally placed directly below Custom Deployment.
-        addActionLink(dropdown, {
-            href: '#',
-            icon: CUSTOMERBOX_ICON,
-            title: 'Old Stack-Leiste laden',
-            onClick: event => {
-                event.stopPropagation();
-                activateOldStackView();
-            }
         });
 
         if (tablePlusLink && teamboxId) {
@@ -3808,7 +3718,7 @@ if (typeof GM_registerMenuCommand === 'function') {
     // Erzeugt das <img>-Icon für einen Link/ein Element inkl. gemeinsamem
     // Fehlerfall (Icon lädt nicht -> is-disabled-Klasse + Titel-Hinweis).
     // Ersetzt die zuvor vierfach fast identisch kopierte <img>-Erzeugung in
-    // addNativeIconLink / addExternalAppLink / addCustomerboxIconLink / addBrandLink.
+    // addNativeIconLink / addExternalAppLink / addIconLink / addBrandLink.
     function attachIconImage(target, icon, title, { pointerEventsNone = false, altFromTitle = false } = {}) {
         const image = document.createElement('img');
         image.src = icon;
@@ -3982,7 +3892,7 @@ if (typeof GM_registerMenuCommand === 'function') {
             panel.style.height = `${height}px`;
         };
 
-        const setOpen = open => {
+        const setOpen = (open, requestInformationFocus = false) => {
             simpleTimeDiagnostic(open ? 'panel opened' : 'panel closed', { source: 'icon or restore' });
             wrapper.classList.toggle('is-open', open);
             panel.classList.toggle('is-open', open);
@@ -3994,6 +3904,27 @@ if (typeof GM_registerMenuCommand === 'function') {
                 };
                 if (link.isConnected) positionPanel();
                 else window.requestAnimationFrame(positionWhenReady);
+
+                if (requestInformationFocus) {
+                    // Focus the iframe as part of the user's click, then repeat
+                    // the request briefly in case the embedded userscript is
+                    // still starting up. The child guards against overriding
+                    // any trusted interaction with a SimpleTime field.
+                    try { frame.focus({ preventScroll: true }); } catch (error) { /* ignore */ }
+                    const requestFocus = () => {
+                        if (!panel.classList.contains('is-open') || document.activeElement !== frame || !frame.contentWindow) return;
+                        try {
+                            frame.contentWindow.postMessage(
+                                { type: 'DEA_SIMPLETIME_FOCUS_INFORMATION' },
+                                new URL(targetUrl).origin
+                            );
+                        } catch (error) {
+                            simpleTimeDiagnostic('could not request Information focus from iframe', error);
+                        }
+                    };
+                    requestFocus();
+                    [100, 350, 800].forEach(delay => window.setTimeout(requestFocus, delay));
+                }
             } else {
                 safeStorage.remove(sessionStorage, SIMPLETIME_OPEN_STORAGE_KEY);
             }
@@ -4006,7 +3937,7 @@ if (typeof GM_registerMenuCommand === 'function') {
             serviceIcon: 'simpletime',
             onClick: () => {
                 closeCloneDropdowns(wrapper);
-                setOpen(!wrapper.classList.contains('is-open'));
+                setOpen(!wrapper.classList.contains('is-open'), true);
             }
         });
         link.addEventListener('contextmenu', event => {
@@ -4065,76 +3996,6 @@ if (typeof GM_registerMenuCommand === 'function') {
             !event.altKey;
     }
 
-    function openCustomerboxUrl(url, { popupName = null, popupFeatures = null } = {}) {
-        const target = normalizeUrl(url);
-        if (!target || target === '#') return;
-        const popup = popupFeatures
-            ? window.open(target, popupName || 'dea-popup', popupFeatures)
-            : window.open(target, '_blank', 'noopener,noreferrer');
-        if (!popup) {
-            // Never navigate the current HubSpot tab. If the browser blocks
-            // the popup, leave the original tab unchanged.
-            log('Customerbox icon popup blocked', target);
-        }
-    }
-
-    function addCustomerboxIconLink(parent, {
-        href,
-        icon,
-        title,
-        className = 'dea-link',
-        serviceIcon = null,
-        popupName = null,
-        popupFeatures = null
-    }) {
-        const link = document.createElement('a');
-        if (serviceIcon) link.dataset.serviceIcon = serviceIcon;
-        link.className = `${className} dea-customerbox-link`;
-        link.href = normalizeUrl(href || '#');
-        link.target = '_blank';
-        link.rel = 'noopener noreferrer';
-        link.title = title || '';
-        link.setAttribute('aria-label', title || 'Customerbox-Link öffnen');
-        link.dataset.oldstackLink = 'true';
-
-        // Oldstack links have their own interaction path. Only an unmodified
-        // primary-button activation is routed explicitly; context-menu,
-        // middle-click and modifier-click remain native browser actions.
-        let openedOnPointerDown = false;
-        const consume = event => {
-            event.preventDefault();
-            event.stopPropagation();
-            if (typeof event.stopImmediatePropagation === 'function') {
-                event.stopImmediatePropagation();
-            }
-        };
-        link.addEventListener('pointerdown', event => {
-            if (!isPlainLeftClick(event)) return;
-            openedOnPointerDown = true;
-            consume(event);
-            openCustomerboxUrl(link.href, { popupName, popupFeatures });
-        }, true);
-        link.addEventListener('click', event => {
-            if (!isPlainLeftClick(event)) return;
-            consume(event);
-            if (!openedOnPointerDown) openCustomerboxUrl(link.href, { popupName, popupFeatures });
-            openedOnPointerDown = false;
-        }, true);
-        link.addEventListener('pointercancel', () => {
-            openedOnPointerDown = false;
-        }, true);
-        link.addEventListener('mouseup', event => {
-            if (event.button === 0) {
-                // Keep the flag only until the click generated by this press.
-                setTimeout(() => { openedOnPointerDown = false; }, 0);
-            }
-        }, true);
-
-        attachIconImage(link, icon, title, { pointerEventsNone: true });
-        parent.appendChild(link);
-        return link;
-    }
-
     function addActionLink(parent, { href = '#', icon, title, onClick }) {
         const link = addNativeIconLink(parent, {
             href,
@@ -4148,71 +4009,6 @@ if (typeof GM_registerMenuCommand === 'function') {
             onClick(event, link);
         });
         return link;
-    }
-
-    function addBrandLink(parent, { href, icon, title, loading = false, customerboxLink = false, teambox = null }) {
-        if (href) {
-            return customerboxLink
-                ? addCustomerboxIconLink(parent, {
-                    href,
-                    icon,
-                    title,
-                    className: 'dea-brand'
-                })
-                : addNativeIconLink(parent, {
-                    href,
-                    icon,
-                    title,
-                    className: 'dea-brand',
-                    teambox
-                });
-        }
-
-        const brand = document.createElement('span');
-        brand.className = 'dea-brand';
-        brand.title = title || '';
-        brand.setAttribute('aria-label', title || 'Customerbox wird geladen');
-        brand.dataset.loading = loading ? 'true' : 'false';
-        attachIconImage(brand, icon, title, { pointerEventsNone: true, altFromTitle: true });
-        parent.appendChild(brand);
-        return brand;
-    }
-
-    function addCustomerboxDeaMenu(parent, brandLink) {
-        if (!parent || !brandLink || brandLink.tagName !== 'A') return null;
-
-        const wrapper = document.createElement('span');
-        wrapper.className = 'dea-clone-state-wrap dea-customerbox-action-wrap';
-        parent.insertBefore(wrapper, brandLink);
-        wrapper.appendChild(brandLink);
-
-        const dropdown = document.createElement('span');
-        dropdown.className = 'dea-clone-state-dropdown';
-        dropdown.setAttribute('role', 'menu');
-        dropdown.setAttribute('aria-hidden', 'true');
-
-        addActionLink(dropdown, {
-            href: '#',
-            icon: DEA_ICON,
-            title: 'DEA-Leiste laden',
-            onClick: event => {
-                event.stopPropagation();
-                activateDeaView();
-            }
-        });
-
-        brandLink.addEventListener('contextmenu', event => {
-            event.preventDefault();
-            event.stopPropagation();
-            if (typeof event.stopImmediatePropagation === 'function') event.stopImmediatePropagation();
-            closeCloneDropdowns(wrapper);
-            const open = !wrapper.classList.contains('is-open');
-            wrapper.classList.toggle('is-open', open);
-            dropdown.setAttribute('aria-hidden', String(!open));
-        }, true);
-
-        wrapper.appendChild(dropdown);
-        return dropdown;
     }
 
     function renderLoading() {
@@ -4249,314 +4045,6 @@ if (typeof GM_registerMenuCommand === 'function') {
             .trim()
             .toLowerCase();
     }
-
-    function clearCustomerboxLoadingTimeout() {
-        if (state.customerboxLoadingTimeout !== null) {
-            clearTimeout(state.customerboxLoadingTimeout);
-            state.customerboxLoadingTimeout = null;
-        }
-    }
-
-    function renderCustomerboxSessionExpired(error = null) {
-        if (state.renderMode !== 'customerbox') return;
-
-        clearCustomerboxLoadingTimeout();
-        const authRequired = Boolean(error && error.customerboxAuthRequired);
-        const bar = createBar();
-        bar.classList.remove('is-loading');
-        removeSimpleTimePanelsForBarRefresh();
-        bar.replaceChildren();
-
-        const cluster = document.createElement('span');
-        cluster.className = 'dea-cluster';
-
-        const loginLink = document.createElement('a');
-        loginLink.className = 'dea-login-link';
-        loginLink.href = CUSTOMERBOX_LOADING_URL;
-        loginLink.target = '_blank';
-        loginLink.rel = 'noopener noreferrer';
-        loginLink.title = authRequired
-            ? 'Anmeldung in [C] erforderlich'
-            : 'Customerbox-Session konnte nicht verifiziert werden';
-        loginLink.setAttribute('aria-label', authRequired
-            ? 'Anmeldung in [C] erforderlich. Bitte [C] öffnen.'
-            : 'Customerbox-Session konnte nicht verifiziert werden. Bitte [C] öffnen oder erneut versuchen.');
-
-        const image = document.createElement('img');
-        image.src = CUSTOMERBOX_ICON;
-        image.alt = '';
-        loginLink.appendChild(image);
-
-        const expiredLabel = document.createElement('span');
-        expiredLabel.className = 'dea-session-expired';
-        expiredLabel.textContent = authRequired
-            ? 'Anmeldung in [C] erforderlich'
-            : 'Session nicht verifiziert.';
-        loginLink.appendChild(expiredLabel);
-
-        const actionLabel = document.createElement('span');
-        actionLabel.textContent = authRequired
-            ? ''
-            : ' Bitte [C] öffnen oder erneut versuchen.';
-        loginLink.appendChild(actionLabel);
-
-        loginLink.addEventListener('click', event => {
-            if (!isPlainLeftClick(event)) return;
-            event.preventDefault();
-            event.stopPropagation();
-            if (typeof event.stopImmediatePropagation === 'function') {
-                event.stopImmediatePropagation();
-            }
-            // Open a real script-created blank window first. Navigating an
-            // already-created window keeps a reliable Window reference, so the
-            // browser allows this exact tab to be closed automatically.
-            const popup = window.open('about:blank', '_blank');
-            if (!popup) {
-                log('Customerbox login popup blocked');
-            } else {
-                try {
-                    popup.location.href = CUSTOMERBOX_LOADING_URL;
-                } catch (error) {
-                    log('Customerbox login tab could not be navigated', error);
-                }
-
-                // Ist eine Anmeldung erforderlich (Weiterleitung auf
-                // auth.everii.io), muss der neue Tab offen bleiben, damit man
-                // sich dort einloggen kann. Nur beim reinen Session-Refresh
-                // ("Session nicht verifiziert") wird der Tab wieder geschlossen.
-                if (!authRequired) {
-                    const closePopup = () => {
-                        try {
-                            popup.close();
-                        } catch (error) {
-                            log('Customerbox tab could not be closed automatically', error);
-                        }
-                    };
-                    window.setTimeout(closePopup, 500);
-                }
-            }
-            setTimeout(() => refreshCustomerboxOverlay(), 1000);
-        }, true);
-
-        cluster.appendChild(loginLink);
-        bar.appendChild(cluster);
-    }
-
-    function renderCustomerboxLoginTimeout() {
-        if (state.renderMode !== 'customerbox') return;
-        if (getCustomerboxTeambox(state.customerboxData)) return;
-
-        const bar = createBar();
-        bar.classList.add('is-loading');
-        removeSimpleTimePanelsForBarRefresh();
-        bar.replaceChildren();
-
-        const cluster = document.createElement('span');
-        cluster.className = 'dea-cluster';
-
-        const loginLink = document.createElement('a');
-        loginLink.className = 'dea-login-link';
-        loginLink.href = CUSTOMERBOX_LOADING_URL;
-        loginLink.target = '_blank';
-        loginLink.rel = 'noopener noreferrer';
-        loginLink.title = 'Bitte [C] öffnen um Session zu aktualisieren';
-        loginLink.setAttribute('aria-label', 'Abgelaufene Session. Bitte [C] öffnen um Session zu aktualisieren.');
-
-        const image = document.createElement('img');
-        image.src = CUSTOMERBOX_ICON;
-        image.alt = '';
-        loginLink.appendChild(image);
-
-        const expiredLabel = document.createElement('span');
-        expiredLabel.className = 'dea-session-expired';
-        expiredLabel.textContent = 'Abgelaufene Session.';
-        loginLink.appendChild(expiredLabel);
-
-        const actionLabel = document.createElement('span');
-        actionLabel.textContent = ' Bitte [C] öffnen um Session zu aktualisieren.';
-        loginLink.appendChild(actionLabel);
-
-        // Route only an unmodified primary click explicitly. This keeps the
-        // original HubSpot tab unchanged even when the host event layer
-        // interferes with ordinary anchor navigation.
-        loginLink.addEventListener('click', event => {
-            if (!isPlainLeftClick(event)) return;
-            event.preventDefault();
-            event.stopPropagation();
-            if (typeof event.stopImmediatePropagation === 'function') {
-                event.stopImmediatePropagation();
-            }
-            const popup = window.open(CUSTOMERBOX_LOADING_URL, '_blank', 'noopener,noreferrer');
-            if (!popup) {
-                log('Customerbox login popup blocked');
-            } else {
-                // Let Customerbox initialize the session in the newly opened
-                // tab, then close only that script-created tab again.
-                setTimeout(() => {
-                    try {
-                        popup.close();
-                    } catch (error) {
-                        log('Customerbox tab could not be closed automatically', error);
-                    }
-                }, 1200);
-            }
-            // Refresh only the overlay after the Customerbox tab had a moment to
-            // initialize the session; keep the original HubSpot page intact.
-            setTimeout(() => refreshCustomerboxOverlay(), 1500);
-        }, true);
-
-        cluster.appendChild(loginLink);
-        bar.appendChild(cluster);
-    }
-
-    function startCustomerboxLoadingTimeout(ticketId, requestNumber) {
-        clearCustomerboxLoadingTimeout();
-        const expectedTicketId = String(ticketId || state.ticketId || '').trim();
-        const expectedRequestNumber = requestNumber == null ? state.requestNumber : requestNumber;
-        state.customerboxLoadingTimeout = setTimeout(() => {
-            state.customerboxLoadingTimeout = null;
-            if (state.requestNumber !== expectedRequestNumber) return;
-            if (String(state.ticketId || '').trim() !== expectedTicketId) return;
-            if (state.renderMode !== 'customerbox') return;
-            if (getCustomerboxTeambox(state.customerboxData)) return;
-
-            // A tab can still be waiting for the shared Web Lock/localStorage
-            // queue. Never call that an expired session while the request is
-            // still active or queued; wait for its actual result instead.
-            if (state.customerboxLoading) {
-                startCustomerboxLoadingTimeout(expectedTicketId, expectedRequestNumber);
-                return;
-            }
-            renderCustomerboxLoginTimeout();
-        }, CUSTOMERBOX_LOADING_TIMEOUT_MS);
-    }
-
-    function loadCustomerboxData(ticketId) {
-        const id = String(ticketId || state.ticketId || '').trim();
-        const expectedRequestNumber = state.requestNumber;
-        const cbStart = performance.now();
-        if (!id || state.customerboxLoading) return;
-        if (getCustomerboxTeambox(state.customerboxData)) return;
-
-        // Reproduce the old overlay's fast path before making a network call.
-        const cached = readCustomerboxCache(id);
-        if (getCustomerboxTeambox(cached)) {
-            state.customerboxData = cached;
-            state.customerboxSessionError = null;
-            if (state.renderMode === null) state.renderMode = 'customerbox';
-            if (state.renderMode === 'customerbox') renderCustomerboxData(cached, id);
-            markTiming('Customerbox-Cache-Treffer gerendert', cbStart);
-            return;
-        }
-
-        state.customerboxLoading = true;
-        customerboxRequest(id).then(data => {
-            state.customerboxLoading = false;
-            markTiming('Customerbox-Netzwerkantwort erhalten', cbStart);
-            if (state.requestNumber !== expectedRequestNumber) return;
-            if (String(state.ticketId || '').trim() !== id) return;
-            if (!getCustomerboxTeambox(data)) return;
-            clearCustomerboxLoadingTimeout();
-            state.customerboxData = data;
-            state.customerboxSessionError = null;
-            // Customerbox is intentionally probed in parallel with DEA. If
-            // it answers first, show the result immediately; DEA can still
-            // correct the mode when its response arrives.
-            if (state.renderMode === null) state.renderMode = 'customerbox';
-            if (state.renderMode === 'customerbox') renderCustomerboxData(data, id);
-            markTiming('Customerbox-Bar gerendert', cbStart);
-        }).catch(error => {
-            state.customerboxLoading = false;
-            markTiming('Customerbox-Request fehlgeschlagen/beendet', cbStart);
-            if (state.requestNumber !== expectedRequestNumber) return;
-            if (String(state.ticketId || '').trim() !== id) return;
-            if (isCustomerboxSessionExpiredError(error)) {
-                state.customerboxData = null;
-                state.customerboxSessionError = error;
-                // Display a confirmed 401 immediately. If DEA later proves
-                // that this is not an Oldstack ticket, its response replaces
-                // this provisional view with the normal DEA bar.
-                if (state.renderMode === null) state.renderMode = 'customerbox';
-                if (state.renderMode === 'customerbox') renderCustomerboxSessionExpired(error);
-                return;
-            }
-            log('Customerbox rt_data unavailable', error);
-        });
-    }
-
-
-
-
-
-    const OLD_STACK_DETECTION_WINDOW_MS = 30000;
-
-
-
-
-    function renderCustomerboxLoading() {
-        const bar = createBar();
-        bar.classList.add('is-loading');
-        removeSimpleTimePanelsForBarRefresh();
-        bar.replaceChildren();
-
-        // Keep the context already known from DEA while the legacy record is
-        // loading. Only the Customerbox identity/link remains pending.
-        const deaData = state.data || {};
-        const deaTeambox = Array.isArray(deaData.teamboxes) ? deaData.teamboxes.find(Boolean) : null;
-        const cluster = document.createElement('span');
-        cluster.className = 'dea-cluster';
-
-        const context = document.createElement('span');
-        context.className = 'dea-context';
-        const customer = getCustomerName(deaTeambox);
-        const agent = getSupportAgent(deaData, deaTeambox);
-        if (customer) {
-            const topRow = document.createElement('span');
-            topRow.className = 'dea-context-row dea-context-row-top';
-            const customerText = document.createElement('strong');
-            customerText.textContent = customer;
-            topRow.appendChild(customerText);
-            context.appendChild(topRow);
-        }
-        if (agent) {
-            const bottomRow = document.createElement('span');
-            bottomRow.className = 'dea-context-row dea-context-row-bottom';
-            const agentText = document.createElement('span');
-            const agentUnknown = agent === '---' || !String(agent || '').trim();
-            agentText.className = 'support-agent';
-            agentText.textContent = agentUnknown ? 'Unbekannt' : agent;
-            bottomRow.appendChild(agentText);
-            context.appendChild(bottomRow);
-        }
-
-        addBrandLink(cluster, {
-            href: CUSTOMERBOX_LOADING_URL,
-            icon: CUSTOMERBOX_LOADING_ICON,
-            title: 'Customerbox öffnen (Daten werden geladen)',
-            loading: true,
-            // Use the same explicit navigation router as the corrected
-            // Oldstack links. This prevents the HubSpot/bar event layer from
-            // swallowing a normal left click while the data is loading.
-            customerboxLink: true
-        });
-        if (customer || agent) cluster.appendChild(context);
-
-        const repositoryUrl = getRepositoryUrl(deaTeambox, deaData);
-        if (repositoryUrl) {
-            const links = document.createElement('span');
-            links.className = 'dea-links';
-            addIconLink(links, {
-                href: repositoryUrl,
-                icon: ICONS.github,
-                title: 'GitHub Repository',
-                serviceIcon: 'github'
-            });
-            cluster.appendChild(links);
-        }
-        bar.appendChild(cluster);
-        startCustomerboxLoadingTimeout(state.ticketId, state.requestNumber);
-    }
-
 
     function isDeploymentToolSignInError(value) {
         const expected = 'sign in to the teambox deployment tool first';
@@ -4650,7 +4138,7 @@ if (typeof GM_registerMenuCommand === 'function') {
             iconButton.className = 'dea-error-icon-button';
             iconButton.style.cursor = 'pointer';
             const actionLabel = syncError
-                ? 'OldStack-Ansicht laden'
+                ? 'HubSpot-Sync ausführen'
                 : 'Teambox Deployment Tool öffnen';
             iconButton.title = actionLabel;
             iconButton.setAttribute('aria-label', actionLabel);
@@ -4676,7 +4164,7 @@ if (typeof GM_registerMenuCommand === 'function') {
                 iconButton.dataset.errorActionActivated = 'true';
 
                 if (syncError) {
-                    activateOldStackView();
+                    startSyncNow(iconButton);
                     return;
                 }
 
@@ -4729,47 +4217,6 @@ if (typeof GM_registerMenuCommand === 'function') {
         }
     }
 
-    function getLegacyDisplayValues(data, teambox) {
-        const source = data || {};
-        const sourceTeambox = source.teambox || {};
-        const profile = source.profile || {};
-        const server = source.server || {};
-        const customer = source.customer || {};
-
-        const token = String(
-            sourceTeambox.token || teambox && (teambox.token || teambox.name) || ''
-        ).trim();
-        const release = String(
-            profile.tbx_rel_target || profile.release || sourceTeambox.tbx_rel_target || ''
-        ).trim();
-        const serviceTypes = {
-            0: '?',
-            1: 'SaaS',
-            2: 'OnP',
-            3: 'Premium'
-        };
-        const serviceTypeValue = sourceTeambox.service_type ?? sourceTeambox.serviceType;
-        const serviceType = serviceTypes[serviceTypeValue] || String(
-            sourceTeambox.service_type_name || sourceTeambox.serviceTypeName || ''
-        ).trim();
-        const serverName = String(server.name || server.hostname || sourceTeambox.server_name || '').trim();
-        const accountManager = String(
-            customer.acc_manager || customer.account_manager || customer.accountManager || ''
-        ).trim();
-        const country = String(
-            customer.country_code || customer.countryCode || ''
-        ).trim();
-
-        if (!token || !release || !serviceType || !serverName || !accountManager || !country) {
-            return null;
-        }
-
-        return {
-            topLine: `${token}: ${release}`,
-            bottomLine: `(${serviceType}:${serverName}) ${accountManager}:${country}`
-        };
-    }
-
     function normalizeUrl(value) {
         try {
             return new URL(String(value || ''), location.href).href;
@@ -4795,276 +4242,194 @@ if (typeof GM_registerMenuCommand === 'function') {
         const customer = getCustomerName(teambox);
         const agent = getSupportAgent(data, teambox);
         const path = getTeamboxPath(teambox);
-        const isCustomerbox = isCustomerboxMode() && data === state.customerboxData;
-        const customerboxSource = state.customerboxData || data;
-        const customerboxTeambox = getCustomerboxTeambox(customerboxSource);
-        const customerboxUrl = isCustomerbox && customerboxTeambox && customerboxTeambox.id
-            ? getCustomerboxLink(customerboxSource)
-            : null;
-        const isCustomerboxLoading = isCustomerbox && !customerboxUrl;
         const calculatedDeaUrl = getTeamboxToolUrl(teambox) || joinUrl(TOOL, path);
-        const deaUrl = isCustomerbox
-            ? calculatedDeaUrl
-            : getLockedDeaUrl(teambox, calculatedDeaUrl);
+        const deaUrl = getLockedDeaUrl(teambox, calculatedDeaUrl);
         const ticketId = state.ticketId;
 
         const cluster = document.createElement('span');
         cluster.className = 'dea-cluster';
 
-        const brandLink = addBrandLink(cluster, {
-            href: customerboxUrl || (!isCustomerbox ? deaUrl : null),
-            icon: isCustomerboxLoading
-                ? CUSTOMERBOX_LOADING_ICON
-                : (isCustomerbox ? CUSTOMERBOX_ICON : DEA_ICON),
-            title: isCustomerboxLoading
-                ? 'Customerbox-Link wird geladen'
-                : (isCustomerbox ? 'Customerbox Teambox öffnen' : `DEA Teambox ${customer}`),
-            loading: isCustomerboxLoading,
-            customerboxLink: isCustomerbox,
+        addNativeIconLink(cluster, {
+            href: deaUrl,
+            icon: DEA_ICON,
+            title: `DEA Teambox ${customer}`,
+            className: 'dea-brand',
             teambox
         });
-        if (isCustomerbox && customerboxUrl) addCustomerboxDeaMenu(cluster, brandLink);
 
         const context = document.createElement('span');
         context.className = 'dea-context';
-        const legacyDisplay = isCustomerbox
-            ? getLegacyDisplayValues(customerboxSource, teambox)
-            : null;
+        // DEA format: DEA-Icon <customer code> <release> (<agent initials>).
+        // Example: DEA vanderlicht 3.4.2 (MIBA)
+        const topRow = document.createElement('span');
+        topRow.className = 'dea-context-row dea-context-row-top';
 
-        if (legacyDisplay) {
-            const topRow = document.createElement('span');
-            topRow.className = 'dea-context-row dea-context-row-top legacy-context-row';
-            const topText = document.createElement('span');
-            topText.className = 'support-agent';
-            topText.textContent = legacyDisplay.topLine;
-            topRow.appendChild(topText);
-            context.appendChild(topRow);
+        const customerText = document.createElement('strong');
+        customerText.textContent = customer;
+        topRow.appendChild(customerText);
+        const ownerStatus = createTicketOwnerStatus(data, teambox);
+        if (ownerStatus) topRow.appendChild(ownerStatus);
+        context.appendChild(topRow);
 
-            const bottomRow = document.createElement('span');
-            bottomRow.className = 'dea-context-row dea-context-row-bottom legacy-context-row';
-            const bottomText = document.createElement('span');
-            bottomText.className = 'support-agent';
-            bottomText.textContent = legacyDisplay.bottomLine;
-            bottomRow.appendChild(bottomText);
-            context.appendChild(bottomRow);
-        } else {
-            // DEA format: DEA-Icon <customer code> <release> (<agent initials>).
-            // Example: DEA vanderlicht 3.4.2 (MIBA)
-            const topRow = document.createElement('span');
-            topRow.className = 'dea-context-row dea-context-row-top';
+        const bottomRow = document.createElement('span');
+        bottomRow.className = 'dea-context-row dea-context-row-bottom';
 
-            const customerText = document.createElement('strong');
-            customerText.textContent = customer;
-            topRow.appendChild(customerText);
-            const ownerStatus = createTicketOwnerStatus(data, teambox);
-            if (ownerStatus) topRow.appendChild(ownerStatus);
-            context.appendChild(topRow);
+        const release = getReleaseNumber(teambox);
+        const releaseText = document.createElement('span');
+        releaseText.className = 'support-agent';
+        releaseText.textContent = release || 'Unbekannt';
+        bottomRow.appendChild(releaseText);
 
-            const bottomRow = document.createElement('span');
-            bottomRow.className = 'dea-context-row dea-context-row-bottom';
-
-            const release = getReleaseNumber(teambox);
-            const releaseText = document.createElement('span');
-            releaseText.className = 'support-agent';
-            releaseText.textContent = release || 'Unbekannt';
-            bottomRow.appendChild(releaseText);
-
-            const agentText = document.createElement('span');
-            const agentUnknown = agent === '---' || !String(agent || '').trim();
-            const agentLabel = agentUnknown ? 'Unbekannt' : (getAgentShortName(agent) || agent);
-            // Unknown customer responsibility uses the same neutral color as
-            // the release number instead of the red fallback styling.
-            agentText.className = 'support-agent';
-            agentText.textContent = `(${agentLabel})`;
-            bottomRow.appendChild(agentText);
-            context.appendChild(bottomRow);
-        }
+        const agentText = document.createElement('span');
+        const agentUnknown = agent === '---' || !String(agent || '').trim();
+        const agentLabel = agentUnknown ? 'Unbekannt' : (getAgentShortName(agent) || agent);
+        // Unknown customer responsibility uses the same neutral color as
+        // the release number instead of the red fallback styling.
+        agentText.className = 'support-agent';
+        agentText.textContent = `(${agentLabel})`;
+        bottomRow.appendChild(agentText);
+        context.appendChild(bottomRow);
         cluster.appendChild(context);
 
         const links = document.createElement('span');
         links.className = 'dea-links';
-        const addModeIconLink = isCustomerbox ? addCustomerboxIconLink : addIconLink;
 
         const clones = Array.isArray(teambox.clones) ? [...teambox.clones] : [];
 
-        if (isCustomerbox) {
-            const liveTeamboxUrl = getCustomerboxLiveUrl(customerboxSource, teambox);
-            const supportboxUrl = getCustomerboxSupportUrl(customerboxSource, teambox, state.ticketId);
-            const customerboxLinkInstallUrl = getCustomerboxInstallUrl(customerboxSource, teambox, state.ticketId) ||
-                getCustomerboxInstallUrl(data, teambox, state.ticketId);
-
-            if (liveTeamboxUrl) {
-                addModeIconLink(links, {
-                    href: liveTeamboxUrl,
-                    icon: ICONS.openClone,
-                    title: 'Live-Teambox öffnen'
-                });
-            }
-
-            if (supportboxUrl) {
-                // A clone already exists on the old stack: replace Create Clone
-                // with the actual Supportbox link.
-                addModeIconLink(links, {
-                    href: supportboxUrl,
-                    icon: ICONS.supportbox,
-                    title: 'Supportbox öffnen'
-                });
-            } else if (customerboxLinkInstallUrl) {
-                addModeIconLink(links, {
-                    href: customerboxLinkInstallUrl,
-                    icon: ICONS.createClone,
-                    title: 'Create Clone im alten Stack'
-                });
-            }
-
-            const featureboxUrl = getCustomerboxFeatureboxLink(customerboxSource);
-            if (featureboxUrl) {
-                addModeIconLink(links, {
-                    href: featureboxUrl,
-                    icon: ICONS.featurebox,
-                    title: 'Featurebox öffnen'
-                });
-            }
-        } else {
-            // The green T icon and the Teambox icon use the same deployment
-            // ID. Sort by that exact ID first, because it is the reliable
-            // creation-order key for the DEA Teambox records. Do not sort by
-            // clone.id/deployment_id independently: those fields can represent
-            // another object and can produce the wrong Roman-number order.
-            const cloneEntries = clones.map((clone, originalIndex) => {
-                const cloneUrl = getCloneUrl(clone);
-                const deploymentId = getCloneDeploymentId(clone, cloneUrl);
-                const numericDeploymentId = Number(deploymentId);
-                return {
-                    clone,
-                    originalIndex,
-                    deploymentId,
-                    numericDeploymentId: Number.isFinite(numericDeploymentId) ? numericDeploymentId : null
-                };
-            });
-
-            const allHaveDeploymentIds = cloneEntries.length > 0 &&
-                cloneEntries.every(entry => entry.numericDeploymentId !== null);
-
-            const getCloneTimestamp = clone => {
-                if (!clone) return null;
-                const dateFields = [
-                    clone.created_at,
-                    clone.createdAt,
-                    clone.created,
-                    clone.created_on,
-                    clone.createdOn,
-                    clone.timestamp,
-                    clone.date,
-                    clone.started_at,
-                    clone.startedAt
-                ];
-                for (const value of dateFields) {
-                    if (value === null || value === undefined || value === '') continue;
-                    const numeric = typeof value === 'number' ? value : Number(value);
-                    if (Number.isFinite(numeric) && numeric > 0) {
-                        return numeric < 100000000000 ? numeric * 1000 : numeric;
-                    }
-                    const parsed = Date.parse(String(value));
-                    if (Number.isFinite(parsed)) return parsed;
-                }
-                return null;
+        // The green T icon and the Teambox icon use the same deployment
+        // ID. Sort by that exact ID first, because it is the reliable
+        // creation-order key for the DEA Teambox records. Do not sort by
+        // clone.id/deployment_id independently: those fields can represent
+        // another object and can produce the wrong Roman-number order.
+        const cloneEntries = clones.map((clone, originalIndex) => {
+            const cloneUrl = getCloneUrl(clone);
+            const deploymentId = getCloneDeploymentId(clone, cloneUrl);
+            const numericDeploymentId = Number(deploymentId);
+            return {
+                clone,
+                originalIndex,
+                deploymentId,
+                numericDeploymentId: Number.isFinite(numericDeploymentId) ? numericDeploymentId : null
             };
+        });
 
-            const allHaveTimestamps = cloneEntries.length > 0 &&
-                cloneEntries.every(entry => getCloneTimestamp(entry.clone) !== null);
+        const allHaveDeploymentIds = cloneEntries.length > 0 &&
+            cloneEntries.every(entry => entry.numericDeploymentId !== null);
 
-            cloneEntries.sort((left, right) => {
-                if (allHaveDeploymentIds) {
-                    return left.numericDeploymentId - right.numericDeploymentId ||
-                        left.originalIndex - right.originalIndex;
+        const getCloneTimestamp = clone => {
+            if (!clone) return null;
+            const dateFields = [
+                clone.created_at,
+                clone.createdAt,
+                clone.created,
+                clone.created_on,
+                clone.createdOn,
+                clone.timestamp,
+                clone.date,
+                clone.started_at,
+                clone.startedAt
+            ];
+            for (const value of dateFields) {
+                if (value === null || value === undefined || value === '') continue;
+                const numeric = typeof value === 'number' ? value : Number(value);
+                if (Number.isFinite(numeric) && numeric > 0) {
+                    return numeric < 100000000000 ? numeric * 1000 : numeric;
                 }
-                if (allHaveTimestamps) {
-                    return getCloneTimestamp(left.clone) - getCloneTimestamp(right.clone) ||
-                        left.originalIndex - right.originalIndex;
-                }
-                // Last-resort stable order only when the API provides neither
-                // a usable deployment ID nor a complete timestamp set.
-                return left.originalIndex - right.originalIndex;
-            });
+                const parsed = Date.parse(String(value));
+                if (Number.isFinite(parsed)) return parsed;
+            }
+            return null;
+        };
 
-            clones.splice(0, clones.length, ...cloneEntries.map(entry => entry.clone));
+        const allHaveTimestamps = cloneEntries.length > 0 &&
+            cloneEntries.every(entry => getCloneTimestamp(entry.clone) !== null);
 
-            // Each clone is immediately followed by the terminal for that clone.
-            clones.forEach((clone, index) => {
-                const cloneUrl = getCloneUrl(clone);
-                const cloneId = getCloneDeploymentId(clone, cloneUrl);
-                // The Teambox link is part of the clone dropdown in both
-                // action modes. Keep the green T as the only visible trigger.
-                if (cloneUrl) {
-                    const stateWrapper = addCloneStateIcon(links, clone, index);
-                    const tableplusUrl = getCloneTablePlusUrl(clone);
+        cloneEntries.sort((left, right) => {
+            if (allHaveDeploymentIds) {
+                return left.numericDeploymentId - right.numericDeploymentId ||
+                    left.originalIndex - right.originalIndex;
+            }
+            if (allHaveTimestamps) {
+                return getCloneTimestamp(left.clone) - getCloneTimestamp(right.clone) ||
+                    left.originalIndex - right.originalIndex;
+            }
+            // Last-resort stable order only when the API provides neither
+            // a usable deployment ID nor a complete timestamp set.
+            return left.originalIndex - right.originalIndex;
+        });
 
-                    if (isCloneRunning(clone)) {
-                        if (CLONE_ACTION_MODE === 'dropdown') {
-                            addCloneDropdown(stateWrapper, clone, index, cloneId);
-                        } else {
-                            addPermanentCloneDeleteMenu(stateWrapper, clone, index, cloneId);
-                            addLogsLink(links, cloneId, `${index + 1}: ${getCloneName(clone)}`);
-                            if (tableplusUrl) {
-                                addExternalAppLink(links, {
-                                    href: tableplusUrl,
-                                    icon: ICONS.tableplus,
-                                    title: `TablePlus ${index + 1}: ${getCloneName(clone)}`
+        clones.splice(0, clones.length, ...cloneEntries.map(entry => entry.clone));
+
+        // Each clone is immediately followed by the terminal for that clone.
+        clones.forEach((clone, index) => {
+            const cloneUrl = getCloneUrl(clone);
+            const cloneId = getCloneDeploymentId(clone, cloneUrl);
+            // The Teambox link is part of the clone dropdown in both
+            // action modes. Keep the green T as the only visible trigger.
+            if (cloneUrl) {
+                const stateWrapper = addCloneStateIcon(links, clone, index);
+                const tableplusUrl = getCloneTablePlusUrl(clone);
+
+                if (isCloneRunning(clone)) {
+                    if (CLONE_ACTION_MODE === 'dropdown') {
+                        addCloneDropdown(stateWrapper, clone, index, cloneId);
+                    } else {
+                        addPermanentCloneDeleteMenu(stateWrapper, clone, index, cloneId);
+                        addLogsLink(links, cloneId, `${index + 1}: ${getCloneName(clone)}`);
+                        if (tableplusUrl) {
+                            addExternalAppLink(links, {
+                                href: tableplusUrl,
+                                icon: ICONS.tableplus,
+                                title: `TablePlus ${index + 1}: ${getCloneName(clone)}`
+                            });
+
+                            // Terminal is only meaningful when the corresponding
+                            // database/TablePlus link is available.
+                            const terminalUrl = getCloneTerminalUrl(clone, cloneId);
+                            if (terminalUrl) {
+                                addIconLink(links, {
+                                    href: terminalUrl,
+                                    icon: ICONS.terminal,
+                                    title: `Terminal ${index + 1}: ${getCloneName(clone)}`
                                 });
-
-                                // Terminal is only meaningful when the corresponding
-                                // database/TablePlus link is available.
-                                const terminalUrl = getCloneTerminalUrl(clone, cloneId);
-                                if (terminalUrl) {
-                                    addModeIconLink(links, {
-                                        href: terminalUrl,
-                                        icon: ICONS.terminal,
-                                        title: `Terminal ${index + 1}: ${getCloneName(clone)}`
-                                    });
-                                }
                             }
                         }
-                    } else {
-                        addInactiveCloneProgressDropdown(stateWrapper, clone, index, cloneId);
                     }
+                } else {
+                    addInactiveCloneProgressDropdown(stateWrapper, clone, index, cloneId);
                 }
-            });
+            }
+        });
 
-            // If there are no clones, only Create Clone remains. No T or terminal icon
-            // is created in that case.
-            addActionLink(links, {
-                href: '#',
-                icon: ICONS.createClone,
-                title: clones.length ? 'Create another Clone' : 'Create Clone',
-                onClick: event => createClone(event, teambox, links)
-            });
-        }
+        // If there are no clones, only Create Clone remains. No T or terminal icon
+        // is created in that case.
+        addActionLink(links, {
+            href: '#',
+            icon: ICONS.createClone,
+            title: clones.length ? 'Create another Clone' : 'Create Clone',
+            onClick: event => createClone(event, teambox, links)
+        });
 
         const youtrack = getYouTrackConfig(data);
-        const youtrackUrl = isCustomerbox
-            ? getLegacyYouTrackUrl(customerboxSource, ticketId)
-            : getYouTrackUrl(youtrack, state.youtrackIssues.get(ticketId));
+        const youtrackUrl = getYouTrackUrl(youtrack, state.youtrackIssues.get(ticketId));
         if (youtrackUrl) {
-            const youtrackLink = addModeIconLink(links, {
+            const youtrackLink = addIconLink(links, {
                 href: youtrackUrl,
                 icon: ICONS.youtrack,
                 title: 'YouTrack Issue',
                 serviceIcon: 'youtrack'
             });
-            if (!isCustomerbox) {
-                addYouTrackSysopsMenu(links, youtrackLink, {
-                    ticketId,
-                    teamboxId: getTeamboxId(teambox),
-                    name: customer,
-                    teamboxUrl: deaUrl
-                });
-            }
+            addYouTrackSysopsMenu(links, youtrackLink, {
+                ticketId,
+                teamboxId: getTeamboxId(teambox),
+                name: customer,
+                teamboxUrl: deaUrl
+            });
         }
 
         const repositoryUrl = getRepositoryUrl(teambox, data);
         if (repositoryUrl) {
-            const githubLink = addModeIconLink(links, {
+            const githubLink = addIconLink(links, {
                 href: repositoryUrl,
                 icon: ICONS.github,
                 title: `GitHub Repository: ${customer}`,
@@ -5244,32 +4609,6 @@ if (typeof GM_registerMenuCommand === 'function') {
         return dropdown;
     }
 
-    function getLegacyYouTrackUrl(data, fallbackTicketId) {
-        const source = data || {};
-        const sourceTeambox = source.teambox || {};
-        const profile = source.profile || {};
-        const ticket = source.ticket || {};
-
-        const ticketId = String(ticket.id || fallbackTicketId || '').trim();
-        const release = String(profile.tbx_rel_target || profile.release || '').trim();
-        const customer = String(sourceTeambox.token || sourceTeambox.customer || '').trim();
-        if (!ticketId || !release || !customer) return null;
-
-        const description =
-            `%7C%20%20%7C%20%20%7C%0A` +
-            `%7C%20---%20%7C%20---%20%7C%0A` +
-            `%7C%20Support%20Ticket:%20%7C%20${encodeURIComponent(ticketId)}%20%7C%0A` +
-            `%7C%20Reproducible%20in:%20%7C%20%20%7C%0A` +
-            `%7C%20Release:%20%7C%20${encodeURIComponent(release)}%20%7C%0A` +
-            `%0A%23%23%20Reproduction%20Steps%0A%0A*%20` +
-            `%0A%0A%23%23%20Results%0A%0A*%20` +
-            `%0A%0A%23%23%20Expected%20Result%0A%0A*%20`;
-
-        return `https://youtrack.everii.io/newIssue?project=TEAMBOX&description=${description}` +
-            `&c=Type%20Bug&c=Clients+${encodeURIComponent(customer)}` +
-            `&c=HubspotTicketId+${encodeURIComponent(ticketId)}`;
-    }
-
     function getYouTrackConfig(data) {
         return data && data.youtrack;
     }
@@ -5379,7 +4718,7 @@ if (typeof GM_registerMenuCommand === 'function') {
         // Leiste ohne Neuladen aus den vorhandenen Daten neu zeichnen, damit das
         // T sofort die Lösch-Animation zeigt.
         try {
-            if (state.data && canRenderDea()) renderData(state.data);
+            if (state.data) renderData(state.data);
         } catch (error) {
             log('Could not redraw bar for delete animation', error);
         }
@@ -5484,11 +4823,7 @@ if (typeof GM_registerMenuCommand === 'function') {
             const refreshedApiState = getApiOwnershipState(refreshed);
             state.ticketOwnerAccess = refreshedApiState === null ? true : refreshedApiState;
             rememberRevision(refreshed, state.ticketId);
-            if (canRenderDea()) {
-                renderData(refreshed);
-            } else {
-                renderCustomerboxMode();
-            }
+            renderData(refreshed);
         } catch (error) {
             if (isTicketNotOpenError(error)) state.ticketOwnerAccess = false;
             renderError(error);
@@ -5497,144 +4832,6 @@ if (typeof GM_registerMenuCommand === 'function') {
         }
     }
 
-    function getCustomerboxTeambox(data) {
-        return data && data.teambox && typeof data.teambox === 'object' ? data.teambox : null;
-    }
-
-    function getCustomerboxCustomerName(data) {
-        const teambox = getCustomerboxTeambox(data);
-        return String(
-            (teambox && (teambox.token || teambox.customer || teambox.name)) ||
-            (data && data.customer && (data.customer.token || data.customer.name)) ||
-            'Teambox'
-        );
-    }
-
-    function getCustomerboxLink(data) {
-        const teambox = getCustomerboxTeambox(data);
-        const id = teambox && teambox.id;
-        return id
-            ? `${CUSTOMERBOX_TEAMBOXES_URL}${encodeURIComponent(id)}`
-            : CUSTOMERBOX_TEAMBOXES_URL;
-    }
-
-    function getCustomerboxFeatureboxLink(data) {
-        const teambox = getCustomerboxTeambox(data);
-        const id = teambox && teambox.id;
-        return id
-            ? `${CUSTOMERBOX_TEAMBOXES_URL.replace(/teamboxes\/index\/$/, 'featurebox/index/')}${encodeURIComponent(id)}`
-            : null;
-    }
-
-    // ---- Stack selection -------------------------------------------------
-    // The current Original Overlay exposes the stack as DEA response data:
-    // a teambox with the exact badge label "Old stack" belongs to Customerbox.
-    // A parallel Customerbox probe may render a provisional result earlier;
-    // this DEA badge remains the authoritative final mode decision.
-    function getBadgeText(badge) {
-        if (badge == null) return '';
-        if (typeof badge === 'string' || typeof badge === 'number') return String(badge);
-        if (typeof badge !== 'object') return '';
-        return String(badge.label || badge.name || badge.text || badge.title || badge.value || '');
-    }
-
-    function hasCustomerboxBadge(teambox) {
-        const badges = Array.isArray(teambox && teambox.badges) ? teambox.badges : [];
-        return badges.some(badge => getBadgeText(badge).trim().toLowerCase() === 'old stack');
-    }
-
-    function hasCustomerboxTeambox(data) {
-        const teamboxes = Array.isArray(data && data.teamboxes) ? data.teamboxes : [];
-        return teamboxes.some(hasCustomerboxBadge);
-    }
-
-    // ---- STOPPED-STATE-LOGIK START ---------------------------------------
-    // Kunden, die bereits auf der neuen Infrastruktur angelegt sind, aber
-    // noch real auf dem Old Stack laufen, haben in der DEA-API weder Badge
-    // noch State-Feld. Der State ("Stopped") steht nur auf der Detailseite
-    // der Teambox. Sind alle Teamboxen des Tickets gestoppt, wird daher
-    // die Old-Stack-/Customerbox-Ansicht geladen.
-    function fetchTeamboxState(teamboxId) {
-        return new Promise(resolve => {
-            if (teamboxId == null || typeof GM_xmlhttpRequest !== 'function') {
-                resolve(null);
-                return;
-            }
-            GM_xmlhttpRequest({
-                method: 'GET',
-                url: `${TOOL}/teamboxes/${encodeURIComponent(teamboxId)}`,
-                timeout: 8000,
-                onload(response) {
-                    try {
-                        const doc = new DOMParser().parseFromString(response.responseText || '', 'text/html');
-                        const dt = Array.from(doc.querySelectorAll('dt'))
-                            .find(el => /^state\b/i.test(el.textContent.trim()));
-                        const dd = dt && dt.nextElementSibling;
-                        const value = dd ? dd.textContent.trim().toLowerCase() : '';
-                        resolve(value || null);
-                    } catch (error) {
-                        resolve(null);
-                    }
-                },
-                onerror: () => resolve(null),
-                ontimeout: () => resolve(null),
-                onabort: () => resolve(null)
-            });
-        });
-    }
-
-    async function areAllTeamboxesStopped(data) {
-        const teamboxes = Array.isArray(data && data.teamboxes) ? data.teamboxes : [];
-        if (teamboxes.length === 0) return false;
-        const states = await Promise.all(teamboxes.map(tb => fetchTeamboxState(tb && tb.id)));
-        // Bei unbekanntem State (Fehler, Login-Seite, ...) bleibt es bei DEA.
-        return states.every(value => value === 'stopped');
-    }
-
-    async function resolveRenderMode(data) {
-        if (hasCustomerboxTeambox(data)) return 'customerbox';
-        return (await areAllTeamboxesStopped(data)) ? 'customerbox' : 'dea';
-    }
-    // ---- STOPPED-STATE-LOGIK END -----------------------------------------
-
-    function canRenderDea() {
-        return state.renderMode !== 'customerbox';
-    }
-
-    function renderCustomerboxMode() {
-        const customerboxData = state.customerboxData;
-        if (customerboxData && getCustomerboxTeambox(customerboxData)) {
-            renderCustomerboxData(customerboxData, state.ticketId);
-            return;
-        }
-        if (state.customerboxSessionError) {
-            renderCustomerboxSessionExpired(state.customerboxSessionError);
-            return;
-        }
-        renderCustomerboxLoading();
-        loadCustomerboxData(state.ticketId);
-    }
-
-    function renderCustomerboxData(data, ticketId) {
-        if (state.renderMode !== 'customerbox') return;
-        clearCustomerboxLoadingTimeout();
-        const teambox = getCustomerboxTeambox(data);
-        if (!teambox || !teambox.id) {
-            renderCustomerboxLoading();
-            return;
-        }
-
-        state.customerboxData = data;
-        state.ticketId = ticketId || state.ticketId;
-        const bar = createBar();
-        bar.classList.remove('is-loading');
-        removeSimpleTimePanelsForBarRefresh();
-        bar.replaceChildren();
-        renderTeambox(bar, data, teambox);
-    }
-
-    // Button am Ende der Fehlermeldung "Keine Teambox für dieses Ticket gefunden":
-    // startet den HubSpot-Sync (wie das rote Schloss) und lädt das Ticket danach neu.
     function createSyncButton() {
         const button = document.createElement('button');
         button.type = 'button';
@@ -5673,11 +4870,6 @@ if (typeof GM_registerMenuCommand === 'function') {
     }
 
     function renderData(data) {
-        if (!canRenderDea()) {
-            renderCustomerboxMode();
-            return;
-        }
-
         const bar = createBar();
         bar.classList.remove('is-loading');
         removeSimpleTimePanelsForBarRefresh();
@@ -5703,10 +4895,6 @@ if (typeof GM_registerMenuCommand === 'function') {
             const response = await apiRequest('GET', 'hubspot/youtrack', ticketId);
             state.youtrackIssues.set(ticketId, response.issues || []);
             if (state.data !== data || state.ticketId !== ticketId) return;
-            if (!canRenderDea()) {
-                renderCustomerboxMode();
-                return;
-            }
             renderData(data);
         } catch (error) {
             log('DEA YouTrack link unavailable', error);
@@ -5717,7 +4905,7 @@ if (typeof GM_registerMenuCommand === 'function') {
     // WORKAROUND-SYNC-LOGIK START
     // Entfernen mit dem Befehl: "ENTFERNE WORKAROUND-SYNC-LOGIK"
     // Zweck: Wenn DEA meldet, dass das Ticket noch nicht aus HubSpot
-    // synchronisiert wurde, die OldStack-/Customerbox-Ansicht laden.
+    // synchronisiert wurde, kann der Nutzer den HubSpot-Sync ausführen.
     function isHubSpotSyncWorkaroundError(value) {
         // HubSpot liefert die Meldung je nach Fehlerpfad mit oder ohne
         // abschließendes Ausrufezeichen. Die Satzzeichen gehören daher nicht
@@ -5763,35 +4951,24 @@ if (typeof GM_registerMenuCommand === 'function') {
 
     // keepView: Beim Neuladen (Klick auf das T-Icon / Reload-Button) bleibt die
     // aktuell angezeigte Leiste stehen, statt kurz "DEA wird geladen ..." oder
-    // die vorläufige [C]-Leiste zu zeigen. Sie wird erst durch die DEA-Antwort
+    // die aktuelle Leiste zu zeigen. Sie wird erst durch die DEA-Antwort
     // ersetzt.
     async function loadTicket(ticketId, { keepView = false } = {}) {
         const requestNumber = ++state.requestNumber;
         const loadStart = performance.now();
-        const previousMode = keepView && state.ticketId === ticketId ? state.renderMode : null;
-        clearCustomerboxLoadingTimeout();
+        const keepExistingView = keepView && state.ticketId === ticketId &&
+            Boolean(document.getElementById(BAR_ID));
         state.ticketId = ticketId;
         state.data = null;
-        state.customerboxData = null;
-        state.customerboxSessionError = null;
-        state.customerboxLoading = false;
         state.ticketOwnerAccess = null;
-        // Mit gemerktem Modus wird die vorläufige Customerbox-Anzeige unterdrückt
-        // (renderCustomerboxData rendert nur bei renderMode === 'customerbox').
-        state.renderMode = previousMode;
         state.lockedDeaUrls.delete(String(ticketId));
-        if (previousMode) {
+        if (keepExistingView) {
             setBarReloading(true);
         } else {
             setBarReloading(false);
             renderLoading();
         }
         markTiming('Ticket erkannt, Loading-Ansicht gerendert', loadStart);
-
-        // Start the legacy Customerbox request immediately instead of waiting
-        // for the DEA response. This restores the old overlay's fast 401/cache
-        // behavior while the DEA request continues in parallel.
-        loadCustomerboxData(ticketId);
 
         try {
             const data = await apiRequest('GET', 'hubspot/ticket', ticketId);
@@ -5800,33 +4977,16 @@ if (typeof GM_registerMenuCommand === 'function') {
             state.data = data;
             state.ticketOwnerAccess = getApiOwnershipState(data);
 
-            // New Original Overlay contract: the exact DEA badge label
-            // "Old stack" selects Customerbox for the current ticket.
-            // Zusätzlich: Sind alle Teamboxen "Stopped", gilt ebenfalls Old Stack.
-            const resolvedMode = await resolveRenderMode(data);
-            if (requestNumber !== state.requestNumber || state.ticketId !== ticketId) return;
-            state.renderMode = resolvedMode;
             rememberRevision(data, ticketId);
-
             setBarReloading(false);
-            if (state.renderMode === 'customerbox') {
-                renderCustomerboxMode();
-            } else {
-                renderData(data);
-            }
+            renderData(data);
             markTiming('DEA-Bar gerendert', loadStart);
             loadYouTrack(data, ticketId);
         } catch (error) {
             markTiming('DEA-Request fehlgeschlagen', loadStart);
             if (requestNumber !== state.requestNumber || state.ticketId !== ticketId) return;
 
-            // WORKAROUND-SYNC-LOGIK START
-            // Die Sync-Meldung bleibt ein DEA-Fehler. Nur ein Klick auf das
-            // DEA-Icon startet anschließend den OldStack-/Customerbox-Modus.
-            // WORKAROUND-SYNC-LOGIK END
-
             state.ticketOwnerAccess = isTicketNotOpenError(error) ? false : null;
-            state.renderMode = null;
             setBarReloading(false);
             renderError(error);
         }
@@ -5871,23 +5031,6 @@ if (typeof GM_registerMenuCommand === 'function') {
     }
     // WORKAROUND-SYNC-LOGIK END
 
-    function refreshCustomerboxOverlay() {
-        const ticketId = getTicketId();
-        if (!ticketId) return;
-
-        // Invalidate the previous Customerbox callback and keep the current
-        // ticket in OldStack mode. This re-renders only the [C] view instead
-        // of reloading the HubSpot page or waiting for the DEA API again.
-        state.requestNumber += 1;
-        clearCustomerboxLoadingTimeout();
-        state.ticketId = ticketId;
-        state.customerboxData = null;
-        state.customerboxSessionError = null;
-        state.customerboxLoading = false;
-        state.renderMode = 'customerbox';
-        renderCustomerboxMode();
-    }
-
     function setBarReloading(active) {
         const bar = document.getElementById(BAR_ID);
         if (bar) bar.classList.toggle('dea-reloading', Boolean(active));
@@ -5898,7 +5041,7 @@ if (typeof GM_registerMenuCommand === 'function') {
     function reloadOverlay() {
         // Ein physischer Klick löst über die Capture-Handler pointerdown UND click
         // aus. Ohne Sperre startet das zwei komplette Ladezyklen direkt
-        // hintereinander (die Leiste springt mehrfach zwischen DEA- und [C]-Ansicht).
+        // hintereinander und die Leiste flackert.
         const now = Date.now();
         if (now - lastOverlayReloadAt < 1000) return;
         lastOverlayReloadAt = now;
@@ -5909,9 +5052,7 @@ if (typeof GM_registerMenuCommand === 'function') {
             return;
         }
 
-        // Invalidate pending Customerbox/DEA callbacks and rerun only the
-        // overlay data flow. The HubSpot document itself is not reloaded.
-        clearCustomerboxLoadingTimeout();
+        // Rerun only the DEA overlay data flow; do not reload HubSpot.
         loadTicket(ticketId, { keepView: true });
     }
 
@@ -5921,12 +5062,8 @@ if (typeof GM_registerMenuCommand === 'function') {
         state.lastPath = currentPath;
         const ticketId = getTicketId();
         if (!ticketId) {
-            clearCustomerboxLoadingTimeout();
             state.ticketId = null;
             state.data = null;
-            state.customerboxLinkConfirmed = false;
-            state.renderMode = null;
-            state.customerboxLinkRequestNumber = 0;
             state.lockedDeaUrls.clear();
             state.requestNumber += 1;
             clearBar();
